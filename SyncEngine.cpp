@@ -284,76 +284,85 @@ SyncStats SyncFolderPair(const SyncPair& pair, const SyncOptions& options, SyncL
     const fs::path sourceRoot(pair.source);
     const fs::path targetRoot(pair.target);
 
-    // 预遍历计算总数
-    size_t totalFiles = 0;
+    auto syncOneWay = [&](const fs::path& src, const fs::path& tgt)
     {
+        // 预遍历计算总数
+        size_t totalFiles = 0;
+        {
+            std::error_code ec;
+            for (const auto& _ : fs::recursive_directory_iterator(src, fs::directory_options::skip_permission_denied, ec))
+                totalFiles++;
+        }
+        size_t processedFiles = 0;
+
+        WriteLog(log, L"开始同步: " + src.wstring() + L" -> " + tgt.wstring());
+
         std::error_code ec;
-        for (const auto& _ : fs::recursive_directory_iterator(sourceRoot, fs::directory_options::skip_permission_denied, ec))
-            totalFiles++;
-    }
-    size_t processedFiles = 0;
+        if (!fs::exists(src, ec) || !fs::is_directory(src, ec))
+        {
+            ++stats.failedFiles;
+            WriteLog(log, L"[失败] 源目录不存在或不可访问: " + src.wstring());
+            return;
+        }
 
-    WriteLog(log, L"开始同步: " + sourceRoot.wstring() + L" -> " + targetRoot.wstring());
-
-    std::error_code ec;
-    if (!fs::exists(sourceRoot, ec) || !fs::is_directory(sourceRoot, ec))
-    {
-        ++stats.failedFiles;
-        WriteLog(log, L"[失败] 源目录不存在或不可访问: " + sourceRoot.wstring());
-        return stats;
-    }
-
-    fs::create_directories(targetRoot, ec);
-    if (ec)
-    {
-        ++stats.failedFiles;
-        WriteLog(log, ErrorMessage(L"创建目标目录", targetRoot, ec));
-        return stats;
-    }
-
-    for (const auto& entry : fs::recursive_directory_iterator(sourceRoot, fs::directory_options::skip_permission_denied, ec))
-    {
+        fs::create_directories(tgt, ec);
         if (ec)
         {
             ++stats.failedFiles;
-            WriteLog(log, ErrorMessage(L"遍历源目录", sourceRoot, ec));
-            ec.clear();
-            continue;
+            WriteLog(log, ErrorMessage(L"创建目标目录", tgt, ec));
+            return;
         }
 
-        processedFiles++;
-        const fs::path relativePath = fs::relative(entry.path(), sourceRoot, ec);
-        if (ec)
+        for (const auto& entry : fs::recursive_directory_iterator(src, fs::directory_options::skip_permission_denied, ec))
         {
-            ++stats.failedFiles;
-            WriteLog(log, ErrorMessage(L"计算相对路径", entry.path(), ec));
-            ec.clear();
-            continue;
-        }
-
-        const fs::path targetPath = targetRoot / relativePath;
-        if (entry.is_directory(ec))
-        {
-            fs::create_directories(targetPath, ec);
             if (ec)
             {
                 ++stats.failedFiles;
-                WriteLog(log, ErrorMessage(L"创建目录", targetPath, ec));
+                WriteLog(log, ErrorMessage(L"遍历源目录", src, ec));
                 ec.clear();
+                continue;
             }
-        }
-        else if (entry.is_regular_file(ec))
-        {
-            CopyFileIncremental(entry.path(), targetPath, stats, log);
-        }
-        
-        if (totalFiles > 0 && progress)
-            progress((float)processedFiles / totalFiles);
-    }
 
-    if (options.deleteExtraFiles)
+            processedFiles++;
+            const fs::path relativePath = fs::relative(entry.path(), src, ec);
+            if (ec)
+            {
+                ++stats.failedFiles;
+                WriteLog(log, ErrorMessage(L"计算相对路径", entry.path(), ec));
+                ec.clear();
+                continue;
+            }
+
+            const fs::path targetPath = tgt / relativePath;
+            if (entry.is_directory(ec))
+            {
+                fs::create_directories(targetPath, ec);
+                if (ec)
+                {
+                    ++stats.failedFiles;
+                    WriteLog(log, ErrorMessage(L"创建目录", targetPath, ec));
+                    ec.clear();
+                }
+            }
+            else if (entry.is_regular_file(ec))
+            {
+                CopyFileIncremental(entry.path(), targetPath, stats, log);
+            }
+            
+            if (totalFiles > 0 && progress)
+                progress((float)processedFiles / totalFiles);
+        }
+
+        if (options.deleteExtraFiles)
+        {
+            DeleteExtraTargetFiles(src, tgt, stats, log);
+        }
+    };
+
+    syncOneWay(sourceRoot, targetRoot);
+    if (pair.isBidirectional)
     {
-        DeleteExtraTargetFiles(sourceRoot, targetRoot, stats, log);
+        syncOneWay(targetRoot, sourceRoot);
     }
 
     WriteLog(log, L"完成同步: 复制 " + std::to_wstring(stats.copiedFiles) +

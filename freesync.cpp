@@ -30,6 +30,12 @@
 #define IDC_LOG_EDIT 1010
 #define IDC_PROGRESS_BAR 1011
 #define IDC_AUTO_MONITOR 1012
+#define IDD_ADD_PAIR_DIALOG 2000
+#define IDC_DLG_SOURCE_EDIT 2001
+#define IDC_DLG_TARGET_EDIT 2002
+#define IDC_DLG_BROWSE_SOURCE 2003
+#define IDC_DLG_BROWSE_TARGET 2004
+#define IDC_DLG_BIDIRECTIONAL 2005
 
 #define WM_APPEND_LOG (WM_USER + 2)
 #define WM_SYNC_COMPLETE (WM_USER + 1)
@@ -56,11 +62,11 @@ ATOM                MyRegisterClass(HINSTANCE hInstance);
 BOOL                InitInstance(HINSTANCE, int);
 LRESULT CALLBACK    WndProc(HWND, UINT, WPARAM, LPARAM);
 INT_PTR CALLBACK    About(HWND, UINT, WPARAM, LPARAM);
+INT_PTR CALLBACK    AddPairDlgProc(HWND, UINT, WPARAM, LPARAM);
 void                CreateMainControls(HWND hWnd);
 void                ResizeMainControls(HWND hWnd);
 std::wstring        GetWindowTextString(HWND hWnd);
 void                AppendLog(HWND hWnd, const std::wstring& text);
-void                AddSyncPair(HWND hWnd);
 void                RemoveSelectedSyncPair(HWND hWnd);
 void                StartSync(HWND hWnd);
 void                ToggleMonitoring(HWND hWnd);
@@ -201,7 +207,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
                 BrowseFolder(hWnd, hTargetEdit);
                 break;
             case IDC_ADD_PAIR:
-                AddSyncPair(hWnd);
+                DialogBox(hInst, MAKEINTRESOURCE(IDD_ADD_PAIR_DIALOG), hWnd, AddPairDlgProc);
                 break;
             case IDC_REMOVE_PAIR:
                 RemoveSelectedSyncPair(hWnd);
@@ -315,40 +321,31 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 
 void CreateMainControls(HWND hWnd)
 {
-    CreateWindowW(L"STATIC", L"源文件夹:", WS_CHILD | WS_VISIBLE,
-        16, 16, 80, 24, hWnd, nullptr, hInst, nullptr);
-    hSourceEdit = CreateWindowW(L"EDIT", L"", WS_CHILD | WS_VISIBLE | WS_BORDER | ES_AUTOHSCROLL,
-        96, 14, 560, 24, hWnd, (HMENU)IDC_SOURCE_EDIT, hInst, nullptr);
-    CreateWindowW(L"BUTTON", L"浏览...", WS_CHILD | WS_VISIBLE,
-        666, 13, 80, 26, hWnd, (HMENU)IDC_BROWSE_SOURCE, hInst, nullptr);
-
-    CreateWindowW(L"STATIC", L"目标文件夹:", WS_CHILD | WS_VISIBLE,
-        16, 52, 80, 24, hWnd, nullptr, hInst, nullptr);
-    hTargetEdit = CreateWindowW(L"EDIT", L"Z:\\", WS_CHILD | WS_VISIBLE | WS_BORDER | ES_AUTOHSCROLL,
-        96, 50, 560, 24, hWnd, (HMENU)IDC_TARGET_EDIT, hInst, nullptr);
-    CreateWindowW(L"BUTTON", L"浏览...", WS_CHILD | WS_VISIBLE,
-        666, 49, 80, 26, hWnd, (HMENU)IDC_BROWSE_TARGET, hInst, nullptr);
-
-    CreateWindowW(L"BUTTON", L"添加同步任务", WS_CHILD | WS_VISIBLE,
-        16, 88, 120, 30, hWnd, (HMENU)IDC_ADD_PAIR, hInst, nullptr);
-    CreateWindowW(L"BUTTON", L"删除选中任务", WS_CHILD | WS_VISIBLE,
-        146, 88, 120, 30, hWnd, (HMENU)IDC_REMOVE_PAIR, hInst, nullptr);
-    hDeleteExtra = CreateWindowW(L"BUTTON", L"同步删除目标中多余文件", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
-        286, 91, 180, 24, hWnd, (HMENU)IDC_DELETE_EXTRA, hInst, nullptr);
-    hAutoMonitor = CreateWindowW(L"BUTTON", L"开启实时监控", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
-        486, 91, 120, 24, hWnd, (HMENU)IDC_AUTO_MONITOR, hInst, nullptr);
-    CreateWindowW(L"BUTTON", L"手动同步", WS_CHILD | WS_VISIBLE,
-        636, 88, 110, 30, hWnd, (HMENU)IDC_START_SYNC, hInst, nullptr);
-
     CreateWindowW(L"STATIC", L"同步任务:", WS_CHILD | WS_VISIBLE,
-        16, 130, 80, 24, hWnd, nullptr, hInst, nullptr);
+        16, 16, 80, 24, hWnd, nullptr, hInst, nullptr);
+    
+    // "+" 按钮
+    CreateWindowW(L"BUTTON", L"➕", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+        100, 14, 30, 24, hWnd, (HMENU)IDC_ADD_PAIR, hInst, nullptr);
+    
+    // "-" 按钮
+    CreateWindowW(L"BUTTON", L"➖", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+        136, 14, 30, 24, hWnd, (HMENU)IDC_REMOVE_PAIR, hInst, nullptr);
+
     hPairList = CreateWindowW(L"LISTBOX", L"", WS_CHILD | WS_VISIBLE | WS_BORDER | WS_VSCROLL | LBS_NOTIFY,
-        16, 154, 846, 180, hWnd, (HMENU)IDC_PAIR_LIST, hInst, nullptr);
+        16, 46, 846, 180, hWnd, (HMENU)IDC_PAIR_LIST, hInst, nullptr);
+
+    hDeleteExtra = CreateWindowW(L"BUTTON", L"同步删除目标中多余文件", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+        16, 236, 180, 24, hWnd, (HMENU)IDC_DELETE_EXTRA, hInst, nullptr);
+    hAutoMonitor = CreateWindowW(L"BUTTON", L"开启实时监控", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+        216, 236, 120, 24, hWnd, (HMENU)IDC_AUTO_MONITOR, hInst, nullptr);
+    CreateWindowW(L"BUTTON", L"手动同步", WS_CHILD | WS_VISIBLE,
+        356, 233, 110, 30, hWnd, (HMENU)IDC_START_SYNC, hInst, nullptr);
 
     CreateWindowW(L"STATIC", L"日志:", WS_CHILD | WS_VISIBLE,
-        16, 346, 80, 24, hWnd, nullptr, hInst, nullptr);
+        16, 276, 80, 24, hWnd, nullptr, hInst, nullptr);
     hLogEdit = CreateWindowW(L"EDIT", L"", WS_CHILD | WS_VISIBLE | WS_BORDER | WS_VSCROLL | ES_MULTILINE | ES_AUTOVSCROLL | ES_READONLY,
-        16, 370, 846, 210, hWnd, (HMENU)IDC_LOG_EDIT, hInst, nullptr);
+        16, 300, 846, 280, hWnd, (HMENU)IDC_LOG_EDIT, hInst, nullptr);
 
     hProgressBar = CreateWindowW(PROGRESS_CLASS, L"", WS_CHILD | WS_VISIBLE | WS_BORDER,
         16, 590, 846, 24, hWnd, (HMENU)IDC_PROGRESS_BAR, hInst, nullptr);
@@ -365,15 +362,9 @@ void ResizeMainControls(HWND hWnd)
     const int width = rc.right - rc.left;
     const int height = rc.bottom - rc.top;
     const int margin = 16;
-    const int editWidth = max(240, width - 300);
 
-    MoveWindow(hSourceEdit, 96, 14, editWidth, 24, TRUE);
-    MoveWindow(GetDlgItem(hWnd, IDC_BROWSE_SOURCE), 106 + editWidth, 13, 80, 26, TRUE);
-    MoveWindow(hTargetEdit, 96, 50, editWidth, 24, TRUE);
-    MoveWindow(GetDlgItem(hWnd, IDC_BROWSE_TARGET), 106 + editWidth, 49, 80, 26, TRUE);
-    MoveWindow(GetDlgItem(hWnd, IDC_START_SYNC), width - 126, 88, 110, 30, TRUE);
-    MoveWindow(hPairList, margin, 154, width - margin * 2, 180, TRUE);
-    MoveWindow(hLogEdit, margin, 370, width - margin * 2, max(80, height - 420), TRUE);
+    MoveWindow(hPairList, margin, 46, width - margin * 2, 180, TRUE);
+    MoveWindow(hLogEdit, margin, 300, width - margin * 2, max(80, height - 350), TRUE);
     MoveWindow(hProgressBar, margin, height - 34, width - margin * 2, 24, TRUE);
 }
 
@@ -415,22 +406,66 @@ void AppendLog(HWND hWnd, const std::wstring& text)
     SendMessageW(hLogEdit, EM_REPLACESEL, FALSE, (LPARAM)line.c_str());
 }
 
-void AddSyncPair(HWND hWnd)
+INT_PTR CALLBACK AddPairDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM lParam)
 {
-    const std::wstring source = GetWindowTextString(hSourceEdit);
-    const std::wstring target = GetWindowTextString(hTargetEdit);
-    if (source.empty() || target.empty())
+    switch (message)
     {
-        MessageBoxW(hWnd, L"请先选择源文件夹和目标文件夹。", L"提示", MB_OK | MB_ICONINFORMATION);
-        return;
-    }
+    case WM_INITDIALOG:
+        return (INT_PTR)TRUE;
 
-    SyncPair pair{ source, target };
-    gSyncPairs.push_back(pair);
-    const std::wstring display = source + L"  ->  " + target;
-    SendMessageW(hPairList, LB_ADDSTRING, 0, (LPARAM)display.c_str());
-    SaveSettings();
-    AppendLog(hWnd, L"[添加任务] " + display);
+    case WM_COMMAND:
+        if (LOWORD(wParam) == IDOK)
+        {
+            const std::wstring source = GetWindowTextString(GetDlgItem(hDlg, IDC_DLG_SOURCE_EDIT));
+            const std::wstring target = GetWindowTextString(GetDlgItem(hDlg, IDC_DLG_TARGET_EDIT));
+            const bool isBidirectional = IsDlgButtonChecked(hDlg, IDC_DLG_BIDIRECTIONAL) == BST_CHECKED;
+
+            if (source.empty() || target.empty())
+            {
+                MessageBoxW(hDlg, L"请先选择源文件夹和目标文件夹。", L"提示", MB_OK | MB_ICONINFORMATION);
+                return (INT_PTR)TRUE;
+            }
+
+            SyncPair pair{ source, target, isBidirectional };
+            gSyncPairs.push_back(pair);
+            std::wstring display = source + L"  ->  " + target;
+            if (isBidirectional)
+            {
+                display = source + L"  <->  " + target;
+            }
+            SendMessageW(hPairList, LB_ADDSTRING, 0, (LPARAM)display.c_str());
+            SaveSettings();
+            AppendLog(GetParent(hDlg), L"[添加任务] " + display);
+            
+            EndDialog(hDlg, LOWORD(wParam));
+            return (INT_PTR)TRUE;
+        }
+        else if (LOWORD(wParam) == IDCANCEL)
+        {
+            EndDialog(hDlg, LOWORD(wParam));
+            return (INT_PTR)TRUE;
+        }
+        else if (LOWORD(wParam) == IDC_DLG_BROWSE_SOURCE)
+        {
+            BrowseFolder(hDlg, GetDlgItem(hDlg, IDC_DLG_SOURCE_EDIT));
+            return (INT_PTR)TRUE;
+        }
+        else if (LOWORD(wParam) == IDC_DLG_BROWSE_TARGET)
+        {
+            BrowseFolder(hDlg, GetDlgItem(hDlg, IDC_DLG_TARGET_EDIT));
+            return (INT_PTR)TRUE;
+        }
+        else if (LOWORD(wParam) == IDC_DLG_BIDIRECTIONAL)
+        {
+            if (IsDlgButtonChecked(hDlg, IDC_DLG_BIDIRECTIONAL) == BST_CHECKED)
+            {
+                MessageBoxW(hDlg, L"双向同步时，两个文件夹的内容会互相合并。开启此选项后，双方都可以作为源文件夹操作。", L"提示", MB_OK | MB_ICONINFORMATION);
+            }
+            return (INT_PTR)TRUE;
+        }
+        break;
+    }
+    return (INT_PTR)FALSE;
 }
 
 void RemoveSelectedSyncPair(HWND hWnd)
