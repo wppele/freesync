@@ -25,7 +25,8 @@ struct SyncStats
 };
 
 using SyncLogCallback = std::function<void(const std::wstring&)>;
+using ProgressCallback = std::function<void(float)>;
 
 bool IsPathAvailable(const std::wstring& path);
-SyncStats SyncFolderPair(const SyncPair& pair, const SyncOptions& options, SyncLogCallback log);
-SyncStats SyncFolderPairs(const std::vector<SyncPair>& pairs, const SyncOptions& options, SyncLogCallback log);
+SyncStats SyncFolderPair(const SyncPair& pair, const SyncOptions& options, SyncLogCallback log, ProgressCallback progress);
+SyncStats SyncFolderPairs(const std::vector<SyncPair>& pairs, const SyncOptions& options, SyncLogCallback log, ProgressCallback progress);

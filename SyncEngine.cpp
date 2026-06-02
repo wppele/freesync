@@ -170,11 +170,20 @@ bool IsPathAvailable(const std::wstring& path)
     return fs::exists(fs::path(path), ec);
 }
 
-SyncStats SyncFolderPair(const SyncPair& pair, const SyncOptions& options, SyncLogCallback log)
+SyncStats SyncFolderPair(const SyncPair& pair, const SyncOptions& options, SyncLogCallback log, ProgressCallback progress)
 {
     SyncStats stats;
     const fs::path sourceRoot(pair.source);
     const fs::path targetRoot(pair.target);
+
+    // 预遍历计算总数
+    size_t totalFiles = 0;
+    {
+        std::error_code ec;
+        for (const auto& _ : fs::recursive_directory_iterator(sourceRoot, fs::directory_options::skip_permission_denied, ec))
+            totalFiles++;
+    }
+    size_t processedFiles = 0;
 
     WriteLog(log, L"开始同步: " + sourceRoot.wstring() + L" -> " + targetRoot.wstring());
 
@@ -204,6 +213,7 @@ SyncStats SyncFolderPair(const SyncPair& pair, const SyncOptions& options, SyncL
             continue;
         }
 
+        processedFiles++;
         const fs::path relativePath = fs::relative(entry.path(), sourceRoot, ec);
         if (ec)
         {
@@ -228,6 +238,9 @@ SyncStats SyncFolderPair(const SyncPair& pair, const SyncOptions& options, SyncL
         {
             CopyFileIncremental(entry.path(), targetPath, stats, log);
         }
+        
+        if (totalFiles > 0 && progress)
+            progress((float)processedFiles / totalFiles);
     }
 
     if (options.deleteExtraFiles)
@@ -243,12 +256,12 @@ SyncStats SyncFolderPair(const SyncPair& pair, const SyncOptions& options, SyncL
     return stats;
 }
 
-SyncStats SyncFolderPairs(const std::vector<SyncPair>& pairs, const SyncOptions& options, SyncLogCallback log)
+SyncStats SyncFolderPairs(const std::vector<SyncPair>& pairs, const SyncOptions& options, SyncLogCallback log, ProgressCallback progress)
 {
     SyncStats total;
     for (const auto& pair : pairs)
     {
-        SyncStats current = SyncFolderPair(pair, options, log);
+        SyncStats current = SyncFolderPair(pair, options, log, progress);
         total.copiedFiles += current.copiedFiles;
         total.skippedFiles += current.skippedFiles;
         total.deletedFiles += current.deletedFiles;

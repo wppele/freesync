@@ -9,6 +9,9 @@
 #include <shlobj.h>
 #include <string>
 #include <vector>
+#include <thread>
+#include <commctrl.h>
+#pragma comment(lib, "comctl32.lib")
 
 #define MAX_LOADSTRING 100
 #define IDC_SOURCE_EDIT 1001
@@ -21,6 +24,11 @@
 #define IDC_DELETE_EXTRA 1008
 #define IDC_START_SYNC 1009
 #define IDC_LOG_EDIT 1010
+#define IDC_PROGRESS_BAR 1011
+
+#define WM_APPEND_LOG (WM_USER + 2)
+#define WM_SYNC_COMPLETE (WM_USER + 1)
+#define WM_UPDATE_PROGRESS (WM_USER + 3)
 
 // Global Variables:
 HINSTANCE hInst;                                // current instance
@@ -31,6 +39,7 @@ HWND hTargetEdit;
 HWND hPairList;
 HWND hDeleteExtra;
 HWND hLogEdit;
+HWND hProgressBar;
 HFONT hMainFont;
 std::vector<SyncPair> gSyncPairs;
 
@@ -207,6 +216,24 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
             EndPaint(hWnd, &ps);
         }
         break;
+    case WM_APPEND_LOG:
+    {
+        std::wstring* msg = (std::wstring*)wParam;
+        AppendLog(hWnd, *msg);
+        delete msg;
+        return 0;
+    }
+    case WM_SYNC_COMPLETE:
+    {
+        EnableWindow(GetDlgItem(hWnd, IDC_START_SYNC), TRUE);
+        MessageBoxW(hWnd, L"同步完成，请查看日志。", L"完成", MB_OK | MB_ICONINFORMATION);
+        return 0;
+    }
+    case WM_UPDATE_PROGRESS:
+    {
+        SendMessageW(hProgressBar, PBM_SETPOS, (WPARAM)wParam, 0);
+        return 0;
+    }
     case WM_DESTROY:
         SaveSettings();
         if (hMainFont)
@@ -256,6 +283,11 @@ void CreateMainControls(HWND hWnd)
         16, 346, 80, 24, hWnd, nullptr, hInst, nullptr);
     hLogEdit = CreateWindowW(L"EDIT", L"", WS_CHILD | WS_VISIBLE | WS_BORDER | WS_VSCROLL | ES_MULTILINE | ES_AUTOVSCROLL | ES_READONLY,
         16, 370, 846, 210, hWnd, (HMENU)IDC_LOG_EDIT, hInst, nullptr);
+
+    hProgressBar = CreateWindowW(PROGRESS_CLASS, L"", WS_CHILD | WS_VISIBLE | WS_BORDER,
+        16, 590, 846, 24, hWnd, (HMENU)IDC_PROGRESS_BAR, hInst, nullptr);
+    SendMessageW(hProgressBar, PBM_SETRANGE, 0, MAKELPARAM(0, 100));
+
     ApplyMainFont(hWnd);
     LoadSettings(hWnd);
 }
@@ -275,7 +307,8 @@ void ResizeMainControls(HWND hWnd)
     MoveWindow(GetDlgItem(hWnd, IDC_BROWSE_TARGET), 106 + editWidth, 49, 80, 26, TRUE);
     MoveWindow(GetDlgItem(hWnd, IDC_START_SYNC), width - 126, 88, 110, 30, TRUE);
     MoveWindow(hPairList, margin, 154, width - margin * 2, 180, TRUE);
-    MoveWindow(hLogEdit, margin, 370, width - margin * 2, max(80, height - 386), TRUE);
+    MoveWindow(hLogEdit, margin, 370, width - margin * 2, max(80, height - 420), TRUE);
+    MoveWindow(hProgressBar, margin, height - 34, width - margin * 2, 24, TRUE);
 }
 
 std::wstring GetWindowTextString(HWND hWnd)
@@ -340,17 +373,26 @@ void StartSync(HWND hWnd)
     }
 
     EnableWindow(GetDlgItem(hWnd, IDC_START_SYNC), FALSE);
-    SyncOptions options;
-    options.deleteExtraFiles = SendMessageW(hDeleteExtra, BM_GETCHECK, 0, 0) == BST_CHECKED;
-    SaveSettings();
+    SendMessageW(hProgressBar, PBM_SETPOS, 0, 0);
+    AppendLog(hWnd, L"[系统] 同步开始...");
 
-    SyncFolderPairs(gSyncPairs, options, [hWnd](const std::wstring& message)
-        {
-            AppendLog(hWnd, message);
-        });
+    std::thread([hWnd]() {
+        SyncOptions options;
+        options.deleteExtraFiles = SendMessageW(hDeleteExtra, BM_GETCHECK, 0, 0) == BST_CHECKED;
+        SaveSettings();
 
-    EnableWindow(GetDlgItem(hWnd, IDC_START_SYNC), TRUE);
-    MessageBoxW(hWnd, L"同步完成，请查看日志。", L"完成", MB_OK | MB_ICONINFORMATION);
+        SyncFolderPairs(gSyncPairs, options, [hWnd](const std::wstring& message)
+            {
+                // 使用 PostMessage 确保跨线程安全更新 UI
+                std::wstring* msg = new std::wstring(message);
+                PostMessageW(hWnd, WM_APPEND_LOG, (WPARAM)msg, 0);
+            }, [hWnd](float progress)
+            {
+                PostMessageW(hWnd, WM_UPDATE_PROGRESS, (WPARAM)(int)(progress * 100), 0);
+            });
+
+        PostMessageW(hWnd, WM_SYNC_COMPLETE, 0, 0); // 通知同步完成
+    }).detach();
 }
 
 void BrowseFolder(HWND owner, HWND targetEdit)
