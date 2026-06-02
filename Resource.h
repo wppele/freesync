@@ -10,11 +10,12 @@
 #define IDM_ABOUT				104
 #define IDM_EXIT				105
 #define IDI_FREESYNC			107
-#define IDI_SMALL				108
-#define IDC_FREESYNC			109
-#define IDC_MYICON				2
+#define IDI_SMALL                       108
+#define IDC_FREESYNC                    109
+#define IDC_MYICON                      2
+#define IDD_ADD_PAIR_DIALOG             2000
 #ifndef IDC_STATIC
-#define IDC_STATIC				-1
+#define IDC_STATIC                      -1
 #endif
 // Next default values for new objects
 //

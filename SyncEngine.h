@@ -11,6 +11,7 @@ struct SyncPair
 {
     std::wstring source;
     std::wstring target;
+    bool isBidirectional = false; // Add bidirectional flag
 };
 
 struct SyncOptions
@@ -37,3 +38,9 @@ bool IsMonitoring();
 bool IsPathAvailable(const std::wstring& path);
 SyncStats SyncFolderPair(const SyncPair& pair, const SyncOptions& options, SyncLogCallback log, ProgressCallback progress);
 SyncStats SyncFolderPairs(const std::vector<SyncPair>& pairs, const SyncOptions& options, SyncLogCallback log, ProgressCallback progress);
+
+#define IDC_START_SYNC 1009
+#define IDC_LOG_EDIT 1010
+#define IDC_PROGRESS_BAR 1011
+#define IDC_AUTO_MONITOR 1012
+#define IDC_ADD_PAIR_DLG 1013 // New ID for Add Pair Dialog button
