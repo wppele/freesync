@@ -11,6 +11,10 @@
 #include <vector>
 #include <thread>
 #include <commctrl.h>
+#include <shellapi.h>
+#include <iomanip>
+#include <sstream>
+#include <chrono>
 #pragma comment(lib, "comctl32.lib")
 
 #define MAX_LOADSTRING 100
@@ -30,6 +34,7 @@
 #define WM_APPEND_LOG (WM_USER + 2)
 #define WM_SYNC_COMPLETE (WM_USER + 1)
 #define WM_UPDATE_PROGRESS (WM_USER + 3)
+#define WM_TRAYICON (WM_USER + 4)
 
 // Global Variables:
 HINSTANCE hInst;                                // current instance
@@ -43,6 +48,7 @@ HWND hAutoMonitor;
 HWND hLogEdit;
 HWND hProgressBar;
 HFONT hMainFont;
+NOTIFYICONDATAW nid = {};
 std::vector<SyncPair> gSyncPairs;
 
 // Forward declarations of functions included in this code module:
@@ -59,6 +65,8 @@ void                RemoveSelectedSyncPair(HWND hWnd);
 void                StartSync(HWND hWnd);
 void                ToggleMonitoring(HWND hWnd);
 void                BrowseFolder(HWND owner, HWND targetEdit);
+void                SetupTrayIcon(HWND hWnd);
+void                RemoveTrayIcon();
 void                ApplyMainFont(HWND hWnd);
 void                RefreshPairList();
 std::wstring        GetConfigPath();
@@ -175,6 +183,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
     {
     case WM_CREATE:
         CreateMainControls(hWnd);
+        SetupTrayIcon(hWnd);
         break;
     case WM_SIZE:
         ResizeMainControls(hWnd);
@@ -240,9 +249,57 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
         SendMessageW(hProgressBar, PBM_SETPOS, (WPARAM)wParam, 0);
         return 0;
     }
+    case WM_CLOSE:
+    {
+        int result = MessageBoxW(hWnd, L"选择【是】最小化到系统托盘，选择【否】直接退出程序。", L"退出提示", MB_YESNOCANCEL | MB_ICONQUESTION);
+        if (result == IDYES)
+        {
+            ShowWindow(hWnd, SW_HIDE);
+            return 0;
+        }
+        else if (result == IDNO)
+        {
+            DestroyWindow(hWnd);
+            return 0;
+        }
+        else
+        {
+            return 0; // 取消关闭
+        }
+    }
+    case WM_TRAYICON:
+    {
+        if (lParam == WM_LBUTTONDBLCLK)
+        {
+            ShowWindow(hWnd, SW_RESTORE);
+            SetForegroundWindow(hWnd);
+        }
+        else if (lParam == WM_RBUTTONUP)
+        {
+            POINT pt;
+            GetCursorPos(&pt);
+            HMENU hMenu = CreatePopupMenu();
+            AppendMenuW(hMenu, MF_STRING, 1, L"显示窗口");
+            AppendMenuW(hMenu, MF_STRING, 2, L"退出程序");
+            SetForegroundWindow(hWnd);
+            int cmd = TrackPopupMenu(hMenu, TPM_RETURNCMD | TPM_NONOTIFY, pt.x, pt.y, 0, hWnd, nullptr);
+            DestroyMenu(hMenu);
+            if (cmd == 1)
+            {
+                ShowWindow(hWnd, SW_RESTORE);
+                SetForegroundWindow(hWnd);
+            }
+            else if (cmd == 2)
+            {
+                DestroyWindow(hWnd);
+            }
+        }
+        return 0;
+    }
     case WM_DESTROY:
         SaveSettings();
         StopMonitoring();
+        RemoveTrayIcon();
         if (hMainFont)
         {
             DeleteObject(hMainFont);
@@ -280,7 +337,7 @@ void CreateMainControls(HWND hWnd)
         286, 91, 180, 24, hWnd, (HMENU)IDC_DELETE_EXTRA, hInst, nullptr);
     hAutoMonitor = CreateWindowW(L"BUTTON", L"开启实时监控", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
         486, 91, 120, 24, hWnd, (HMENU)IDC_AUTO_MONITOR, hInst, nullptr);
-    CreateWindowW(L"BUTTON", L"开始同步", WS_CHILD | WS_VISIBLE,
+    CreateWindowW(L"BUTTON", L"手动同步", WS_CHILD | WS_VISIBLE,
         636, 88, 110, 30, hWnd, (HMENU)IDC_START_SYNC, hInst, nullptr);
 
     CreateWindowW(L"STATIC", L"同步任务:", WS_CHILD | WS_VISIBLE,
@@ -331,9 +388,30 @@ std::wstring GetWindowTextString(HWND hWnd)
 
 void AppendLog(HWND hWnd, const std::wstring& text)
 {
-    const std::wstring line = text + L"\r\n";
-    const int length = GetWindowTextLengthW(hLogEdit);
-    SendMessageW(hLogEdit, EM_SETSEL, length, length);
+    // 获取当前时间
+    auto now = std::chrono::system_clock::now();
+    std::time_t time = std::chrono::system_clock::to_time_t(now);
+    std::tm tm = {};
+    localtime_s(&tm, &time);
+    
+    std::wstringstream ss;
+    ss << L"[" << std::put_time(&tm, L"%H:%M:%S") << L"] " << text << L"\r\n";
+    std::wstring line = ss.str();
+
+    // 限制日志最大长度，保留部分日志即可 (例如最多保留 30,000 个字符)
+    const int maxLogLength = 30000;
+    int currentLength = GetWindowTextLengthW(hLogEdit);
+    
+    if (currentLength + line.length() > maxLogLength)
+    {
+        // 删掉前半部分日志，保留最新的部分
+        int deleteLength = currentLength - (maxLogLength / 2);
+        SendMessageW(hLogEdit, EM_SETSEL, 0, deleteLength);
+        SendMessageW(hLogEdit, EM_REPLACESEL, FALSE, (LPARAM)L"");
+        currentLength = GetWindowTextLengthW(hLogEdit);
+    }
+
+    SendMessageW(hLogEdit, EM_SETSEL, currentLength, currentLength);
     SendMessageW(hLogEdit, EM_REPLACESEL, FALSE, (LPARAM)line.c_str());
 }
 
@@ -464,6 +542,27 @@ void BrowseFolder(HWND owner, HWND targetEdit)
         }
         CoTaskMemFree(pidl);
     }
+}
+
+void SetupTrayIcon(HWND hWnd)
+{
+    nid.cbSize = sizeof(NOTIFYICONDATAW);
+    nid.hWnd = hWnd;
+    nid.uID = 1;
+    nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
+    nid.uCallbackMessage = WM_TRAYICON;
+    nid.hIcon = LoadIcon(hInst, MAKEINTRESOURCE(IDI_FREESYNC)); // 假设图标资源ID是 IDI_FREESYNC
+    if (!nid.hIcon)
+    {
+        nid.hIcon = LoadIcon(nullptr, IDI_APPLICATION); // 如果加载失败，使用系统默认图标
+    }
+    wcscpy_s(nid.szTip, L"FreeSync 实时监控中");
+    Shell_NotifyIconW(NIM_ADD, &nid);
+}
+
+void RemoveTrayIcon()
+{
+    Shell_NotifyIconW(NIM_DELETE, &nid);
 }
 
 void ApplyMainFont(HWND hWnd)
