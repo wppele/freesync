@@ -25,6 +25,7 @@
 #define IDC_START_SYNC 1009
 #define IDC_LOG_EDIT 1010
 #define IDC_PROGRESS_BAR 1011
+#define IDC_AUTO_MONITOR 1012
 
 #define WM_APPEND_LOG (WM_USER + 2)
 #define WM_SYNC_COMPLETE (WM_USER + 1)
@@ -38,6 +39,7 @@ HWND hSourceEdit;
 HWND hTargetEdit;
 HWND hPairList;
 HWND hDeleteExtra;
+HWND hAutoMonitor;
 HWND hLogEdit;
 HWND hProgressBar;
 HFONT hMainFont;
@@ -55,6 +57,7 @@ void                AppendLog(HWND hWnd, const std::wstring& text);
 void                AddSyncPair(HWND hWnd);
 void                RemoveSelectedSyncPair(HWND hWnd);
 void                StartSync(HWND hWnd);
+void                ToggleMonitoring(HWND hWnd);
 void                BrowseFolder(HWND owner, HWND targetEdit);
 void                ApplyMainFont(HWND hWnd);
 void                RefreshPairList();
@@ -194,6 +197,9 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
             case IDC_REMOVE_PAIR:
                 RemoveSelectedSyncPair(hWnd);
                 break;
+            case IDC_AUTO_MONITOR:
+                ToggleMonitoring(hWnd);
+                break;
             case IDC_START_SYNC:
                 StartSync(hWnd);
                 break;
@@ -236,6 +242,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
     }
     case WM_DESTROY:
         SaveSettings();
+        StopMonitoring();
         if (hMainFont)
         {
             DeleteObject(hMainFont);
@@ -270,7 +277,9 @@ void CreateMainControls(HWND hWnd)
     CreateWindowW(L"BUTTON", L"删除选中任务", WS_CHILD | WS_VISIBLE,
         146, 88, 120, 30, hWnd, (HMENU)IDC_REMOVE_PAIR, hInst, nullptr);
     hDeleteExtra = CreateWindowW(L"BUTTON", L"同步删除目标中多余文件", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
-        286, 93, 220, 24, hWnd, (HMENU)IDC_DELETE_EXTRA, hInst, nullptr);
+        286, 91, 180, 24, hWnd, (HMENU)IDC_DELETE_EXTRA, hInst, nullptr);
+    hAutoMonitor = CreateWindowW(L"BUTTON", L"开启实时监控", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+        486, 91, 120, 24, hWnd, (HMENU)IDC_AUTO_MONITOR, hInst, nullptr);
     CreateWindowW(L"BUTTON", L"开始同步", WS_CHILD | WS_VISIBLE,
         636, 88, 110, 30, hWnd, (HMENU)IDC_START_SYNC, hInst, nullptr);
 
@@ -393,6 +402,49 @@ void StartSync(HWND hWnd)
 
         PostMessageW(hWnd, WM_SYNC_COMPLETE, 0, 0); // 通知同步完成
     }).detach();
+}
+
+void ToggleMonitoring(HWND hWnd)
+{
+    const bool isChecked = SendMessageW(hAutoMonitor, BM_GETCHECK, 0, 0) == BST_CHECKED;
+
+    if (isChecked)
+    {
+        if (gSyncPairs.empty())
+        {
+            MessageBoxW(hWnd, L"请至少添加一组同步任务后再开启监控。", L"提示", MB_OK | MB_ICONINFORMATION);
+            SendMessageW(hAutoMonitor, BM_SETCHECK, BST_UNCHECKED, 0);
+            return;
+        }
+
+        EnableWindow(GetDlgItem(hWnd, IDC_ADD_PAIR), FALSE);
+        EnableWindow(GetDlgItem(hWnd, IDC_REMOVE_PAIR), FALSE);
+        EnableWindow(GetDlgItem(hWnd, IDC_START_SYNC), FALSE);
+        EnableWindow(hDeleteExtra, FALSE);
+
+        SyncOptions options;
+        options.deleteExtraFiles = SendMessageW(hDeleteExtra, BM_GETCHECK, 0, 0) == BST_CHECKED;
+        SaveSettings();
+
+        StartMonitoring(gSyncPairs, options, [hWnd](const std::wstring& message)
+        {
+            std::wstring* msg = new std::wstring(message);
+            PostMessageW(hWnd, WM_APPEND_LOG, (WPARAM)msg, 0);
+        }, nullptr);
+
+        AppendLog(hWnd, L"[系统] 实时监控已开启...");
+    }
+    else
+    {
+        StopMonitoring();
+
+        EnableWindow(GetDlgItem(hWnd, IDC_ADD_PAIR), TRUE);
+        EnableWindow(GetDlgItem(hWnd, IDC_REMOVE_PAIR), TRUE);
+        EnableWindow(GetDlgItem(hWnd, IDC_START_SYNC), TRUE);
+        EnableWindow(hDeleteExtra, TRUE);
+
+        AppendLog(hWnd, L"[系统] 实时监控已关闭。");
+    }
 }
 
 void BrowseFolder(HWND owner, HWND targetEdit)

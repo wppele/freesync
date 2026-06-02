@@ -4,6 +4,10 @@
 #include <chrono>
 #include <fstream>
 #include <sstream>
+#include <thread>
+#include <atomic>
+#include <mutex>
+#include <windows.h>
 
 namespace fs = std::filesystem;
 
@@ -162,6 +166,110 @@ namespace
             }
         }
     }
+}
+
+namespace
+{
+    std::atomic<bool> g_isMonitoring{ false };
+    std::thread g_monitorThread;
+    HANDLE g_stopEvent = nullptr;
+
+    void MonitorWorker(std::vector<SyncPair> pairs, SyncOptions options, SyncLogCallback log, ProgressCallback progress)
+    {
+        std::vector<HANDLE> handles;
+        for (const auto& pair : pairs)
+        {
+            HANDLE h = FindFirstChangeNotificationW(pair.source.c_str(), TRUE, 
+                FILE_NOTIFY_CHANGE_FILE_NAME | FILE_NOTIFY_CHANGE_DIR_NAME | FILE_NOTIFY_CHANGE_ATTRIBUTES | FILE_NOTIFY_CHANGE_SIZE | FILE_NOTIFY_CHANGE_LAST_WRITE);
+            if (h != INVALID_HANDLE_VALUE && h != nullptr)
+            {
+                handles.push_back(h);
+            }
+        }
+
+        if (handles.empty()) return;
+
+        g_stopEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+        handles.push_back(g_stopEvent); // 退出事件句柄位于最后
+
+        while (g_isMonitoring)
+        {
+            DWORD waitResult = WaitForMultipleObjects((DWORD)handles.size(), handles.data(), FALSE, INFINITE);
+            
+            if (waitResult >= WAIT_OBJECT_0 && waitResult < WAIT_OBJECT_0 + handles.size() - 1)
+            {
+                int triggeredIndex = waitResult - WAIT_OBJECT_0;
+                
+                // 防抖: 循环等待直到 2 秒内没有新事件
+                bool isSettled = false;
+                while (!isSettled && g_isMonitoring)
+                {
+                    HANDLE waitHandles[2] = { handles[triggeredIndex], g_stopEvent };
+                    DWORD debounceWait = WaitForMultipleObjects(2, waitHandles, FALSE, 2000);
+                    
+                    if (debounceWait == WAIT_TIMEOUT)
+                    {
+                        isSettled = true; // 2秒内无新变化
+                    }
+                    else if (debounceWait == WAIT_OBJECT_0)
+                    {
+                        FindNextChangeNotification(handles[triggeredIndex]); // 消耗掉事件并重置计时
+                    }
+                    else // 包含了收到退出信号 (WAIT_OBJECT_0 + 1) 等情况
+                    {
+                        break;
+                    }
+                }
+
+                if (g_isMonitoring && isSettled)
+                {
+                    WriteLog(log, L"[监控] 检测到变动，触发同步: " + pairs[triggeredIndex].source);
+                    SyncFolderPair(pairs[triggeredIndex], options, log, progress);
+                }
+
+                FindNextChangeNotification(handles[triggeredIndex]);
+            }
+            else if (waitResult == WAIT_OBJECT_0 + handles.size() - 1)
+            {
+                break; // 收到退出信号
+            }
+        }
+
+        for (size_t i = 0; i < handles.size() - 1; ++i)
+        {
+            FindCloseChangeNotification(handles[i]);
+        }
+        CloseHandle(g_stopEvent);
+        g_stopEvent = nullptr;
+    }
+}
+
+void StartMonitoring(const std::vector<SyncPair>& pairs, const SyncOptions& options, SyncLogCallback log, ProgressCallback progress)
+{
+    if (g_isMonitoring) return;
+    g_isMonitoring = true;
+    g_monitorThread = std::thread(MonitorWorker, pairs, options, log, progress);
+}
+
+void StopMonitoring()
+{
+    if (!g_isMonitoring) return;
+    g_isMonitoring = false;
+    
+    if (g_stopEvent)
+    {
+        SetEvent(g_stopEvent);
+    }
+    
+    if (g_monitorThread.joinable())
+    {
+        g_monitorThread.join(); 
+    }
+}
+
+bool IsMonitoring()
+{
+    return g_isMonitoring;
 }
 
 bool IsPathAvailable(const std::wstring& path)
