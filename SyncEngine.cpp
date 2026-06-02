@@ -179,11 +179,23 @@ namespace
         std::vector<HANDLE> handles;
         for (const auto& pair : pairs)
         {
+            // 监控源文件夹
             HANDLE h = FindFirstChangeNotificationW(pair.source.c_str(), TRUE, 
                 FILE_NOTIFY_CHANGE_FILE_NAME | FILE_NOTIFY_CHANGE_DIR_NAME | FILE_NOTIFY_CHANGE_ATTRIBUTES | FILE_NOTIFY_CHANGE_SIZE | FILE_NOTIFY_CHANGE_LAST_WRITE);
             if (h != INVALID_HANDLE_VALUE && h != nullptr)
             {
                 handles.push_back(h);
+            }
+
+            // 如果是双向同步，同时监控目标文件夹
+            if (pair.isBidirectional)
+            {
+                HANDLE hTarget = FindFirstChangeNotificationW(pair.target.c_str(), TRUE, 
+                    FILE_NOTIFY_CHANGE_FILE_NAME | FILE_NOTIFY_CHANGE_DIR_NAME | FILE_NOTIFY_CHANGE_ATTRIBUTES | FILE_NOTIFY_CHANGE_SIZE | FILE_NOTIFY_CHANGE_LAST_WRITE);
+                if (hTarget != INVALID_HANDLE_VALUE && hTarget != nullptr)
+                {
+                    handles.push_back(hTarget);
+                }
             }
         }
 
@@ -200,6 +212,22 @@ namespace
             {
                 int triggeredIndex = waitResult - WAIT_OBJECT_0;
                 
+                // 找出是哪个 pair 被触发了
+                int pairIndex = -1;
+                int currentHandleCount = 0;
+                for (size_t i = 0; i < pairs.size(); ++i)
+                {
+                    int handleCount = pairs[i].isBidirectional ? 2 : 1;
+                    if (triggeredIndex < currentHandleCount + handleCount)
+                    {
+                        pairIndex = (int)i;
+                        break;
+                    }
+                    currentHandleCount += handleCount;
+                }
+                
+                if (pairIndex == -1) continue;
+
                 // 防抖: 循环等待直到 2 秒内没有新事件
                 bool isSettled = false;
                 while (!isSettled && g_isMonitoring)
@@ -223,8 +251,8 @@ namespace
 
                 if (g_isMonitoring && isSettled)
                 {
-                    WriteLog(log, L"[监控] 检测到变动，触发同步: " + pairs[triggeredIndex].source);
-                    SyncFolderPair(pairs[triggeredIndex], options, log, progress);
+                    WriteLog(log, L"[监控] 检测到变动，触发同步: " + pairs[pairIndex].source + L" <-> " + pairs[pairIndex].target);
+                    SyncFolderPair(pairs[pairIndex], options, log, progress);
                 }
 
                 FindNextChangeNotification(handles[triggeredIndex]);
