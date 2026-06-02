@@ -1,0 +1,22 @@
+# Visual Studio
+.vs/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+
+# Build Results
+Debug/
+Release/
+x64/
+x86/
+bin/
+obj/
+*.ilk
+*.exp
+*.lib
+*.pdb
+*.obj
+*.res
+*.exe
+*.recipe
