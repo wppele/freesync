@@ -622,7 +622,11 @@ void RefreshPairList()
     SendMessageW(hPairList, LB_RESETCONTENT, 0, 0);
     for (const auto& pair : gSyncPairs)
     {
-        const std::wstring display = pair.source + L"  ->  " + pair.target;
+        std::wstring display = pair.source + L"  ->  " + pair.target;
+        if (pair.isBidirectional)
+        {
+            display = pair.source + L"  <->  " + pair.target;
+        }
         SendMessageW(hPairList, LB_ADDSTRING, 0, (LPARAM)display.c_str());
     }
 }
@@ -654,11 +658,13 @@ void LoadSettings(HWND hWnd)
         WCHAR target[MAX_PATH * 4]{};
         const std::wstring sourceKey = L"Source" + std::to_wstring(i);
         const std::wstring targetKey = L"Target" + std::to_wstring(i);
+        const std::wstring bidirKey = L"Bidirectional" + std::to_wstring(i);
         GetPrivateProfileStringW(L"Tasks", sourceKey.c_str(), L"", source, ARRAYSIZE(source), configPath.c_str());
         GetPrivateProfileStringW(L"Tasks", targetKey.c_str(), L"", target, ARRAYSIZE(target), configPath.c_str());
+        const int isBidir = GetPrivateProfileIntW(L"Tasks", bidirKey.c_str(), 0, configPath.c_str());
         if (source[0] != L'\0' && target[0] != L'\0')
         {
-            gSyncPairs.push_back(SyncPair{ source, target });
+            gSyncPairs.push_back(SyncPair{ source, target, isBidir != 0 });
         }
     }
 
@@ -682,8 +688,10 @@ void SaveSettings()
     {
         const std::wstring sourceKey = L"Source" + std::to_wstring(i);
         const std::wstring targetKey = L"Target" + std::to_wstring(i);
+        const std::wstring bidirKey = L"Bidirectional" + std::to_wstring(i);
         WritePrivateProfileStringW(L"Tasks", sourceKey.c_str(), gSyncPairs[i].source.c_str(), configPath.c_str());
         WritePrivateProfileStringW(L"Tasks", targetKey.c_str(), gSyncPairs[i].target.c_str(), configPath.c_str());
+        WritePrivateProfileStringW(L"Tasks", bidirKey.c_str(), gSyncPairs[i].isBidirectional ? L"1" : L"0", configPath.c_str());
     }
 }
 

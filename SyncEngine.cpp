@@ -228,9 +228,12 @@ namespace
                 
                 if (pairIndex == -1) continue;
 
+                // 临时暂停监控以防止循环触发
+                g_isMonitoring = false;
+
                 // 防抖: 循环等待直到 2 秒内没有新事件
                 bool isSettled = false;
-                while (!isSettled && g_isMonitoring)
+                while (!isSettled)
                 {
                     HANDLE waitHandles[2] = { handles[triggeredIndex], g_stopEvent };
                     DWORD debounceWait = WaitForMultipleObjects(2, waitHandles, FALSE, 2000);
@@ -249,11 +252,20 @@ namespace
                     }
                 }
 
-                if (g_isMonitoring && isSettled)
+                if (isSettled)
                 {
+                    // 记录触发变动的根目录
+                    pairs[pairIndex].triggeredRoot = (triggeredIndex % 2 == 0) ? pairs[pairIndex].source : pairs[pairIndex].target;
+                    
                     WriteLog(log, L"[监控] 检测到变动，触发同步: " + pairs[pairIndex].source + L" <-> " + pairs[pairIndex].target);
                     SyncFolderPair(pairs[pairIndex], options, log, progress);
+                    
+                    // 同步完成后重置
+                    pairs[pairIndex].triggeredRoot = L"";
                 }
+
+                // 恢复监控
+                g_isMonitoring = true;
 
                 FindNextChangeNotification(handles[triggeredIndex]);
             }
@@ -312,6 +324,9 @@ SyncStats SyncFolderPair(const SyncPair& pair, const SyncOptions& options, SyncL
     const fs::path sourceRoot(pair.source);
     const fs::path targetRoot(pair.target);
 
+    // 只有非双向时或者明确知道是源触发时才执行 src -> tgt
+    // 对于双向同步，如果目标改变，我们要精准执行 tgt -> src
+    // 增加参数标识哪个路径触发了变动
     auto syncOneWay = [&](const fs::path& src, const fs::path& tgt)
     {
         // 预遍历计算总数
@@ -387,10 +402,20 @@ SyncStats SyncFolderPair(const SyncPair& pair, const SyncOptions& options, SyncL
         }
     };
 
-    syncOneWay(sourceRoot, targetRoot);
-    if (pair.isBidirectional)
+    if (pair.isBidirectional && pair.triggeredRoot == pair.target)
     {
+        // 如果是双向并且目标触发，则只需 tgt -> src
         syncOneWay(targetRoot, sourceRoot);
+    }
+    else
+    {
+        // 默认总是 src -> tgt
+        syncOneWay(sourceRoot, targetRoot);
+        // 如果是双向，再 tgt -> src
+        if (pair.isBidirectional)
+        {
+            syncOneWay(targetRoot, sourceRoot);
+        }
     }
 
     WriteLog(log, L"完成同步: 复制 " + std::to_wstring(stats.copiedFiles) +

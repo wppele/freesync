@@ -12,6 +12,7 @@ struct SyncPair
     std::wstring source;
     std::wstring target;
     bool isBidirectional = false; // Add bidirectional flag
+    std::wstring triggeredRoot; // 记录最近一次变动的根目录
 };
 
 struct SyncOptions
