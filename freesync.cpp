@@ -411,7 +411,96 @@ INT_PTR CALLBACK AddPairDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM l
     switch (message)
     {
     case WM_INITDIALOG:
+        DragAcceptFiles(hDlg, TRUE);
         return (INT_PTR)TRUE;
+
+    case WM_DROPFILES:
+    {
+        HDROP hDrop = (HDROP)wParam;
+        const UINT dropCount = DragQueryFileW(hDrop, 0xFFFFFFFF, nullptr, 0);
+        if (dropCount == 0)
+        {
+            DragFinish(hDrop);
+            return (INT_PTR)TRUE;
+        }
+
+        auto getDroppedFolder = [&](UINT index) -> std::wstring
+            {
+                WCHAR path[MAX_PATH * 4]{};
+                if (DragQueryFileW(hDrop, index, path, ARRAYSIZE(path)) == 0)
+                {
+                    return L"";
+                }
+
+                std::wstring folder = path;
+                const DWORD attributes = GetFileAttributesW(folder.c_str());
+                if (attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_DIRECTORY))
+                {
+                    return folder;
+                }
+
+                const size_t slashPos = folder.find_last_of(L"\\/");
+                if (slashPos != std::wstring::npos)
+                {
+                    folder.resize(slashPos);
+                }
+                return folder;
+            };
+
+        const std::wstring firstFolder = getDroppedFolder(0);
+        if (!firstFolder.empty())
+        {
+            HWND sourceEdit = GetDlgItem(hDlg, IDC_DLG_SOURCE_EDIT);
+            HWND targetEdit = GetDlgItem(hDlg, IDC_DLG_TARGET_EDIT);
+            HWND dropTarget = nullptr;
+
+            POINT pt{};
+            if (DragQueryPoint(hDrop, &pt))
+            {
+                dropTarget = ChildWindowFromPoint(hDlg, pt);
+            }
+
+            if (dropTarget == sourceEdit)
+            {
+                SetWindowTextW(sourceEdit, firstFolder.c_str());
+            }
+            else if (dropTarget == targetEdit)
+            {
+                SetWindowTextW(targetEdit, firstFolder.c_str());
+            }
+            else if (GetWindowTextLengthW(sourceEdit) == 0)
+            {
+                SetWindowTextW(sourceEdit, firstFolder.c_str());
+                if (dropCount > 1)
+                {
+                    const std::wstring secondFolder = getDroppedFolder(1);
+                    if (!secondFolder.empty())
+                    {
+                        SetWindowTextW(targetEdit, secondFolder.c_str());
+                    }
+                }
+            }
+            else if (GetWindowTextLengthW(targetEdit) == 0)
+            {
+                SetWindowTextW(targetEdit, firstFolder.c_str());
+            }
+            else
+            {
+                SetWindowTextW(sourceEdit, firstFolder.c_str());
+                if (dropCount > 1)
+                {
+                    const std::wstring secondFolder = getDroppedFolder(1);
+                    if (!secondFolder.empty())
+                    {
+                        SetWindowTextW(targetEdit, secondFolder.c_str());
+                    }
+                }
+            }
+        }
+
+        DragFinish(hDrop);
+        return (INT_PTR)TRUE;
+    }
 
     case WM_COMMAND:
         if (LOWORD(wParam) == IDOK)
