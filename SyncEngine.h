@@ -59,6 +59,7 @@ void StopMonitoring();
 bool IsMonitoring();
 
 bool IsPathAvailable(const std::wstring& path);
+bool DeleteSnapshotForPair(const SyncPair& pair, SyncLogCallback log = nullptr);
 SyncStats SyncFolderPair(const SyncPair& pair, const SyncOptions& options, SyncLogCallback log, ProgressCallback progress);
 SyncStats SyncFolderPairs(const std::vector<SyncPair>& pairs, const SyncOptions& options, SyncLogCallback log, ProgressCallback progress);
 

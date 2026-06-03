@@ -467,6 +467,37 @@ bool IsPathAvailable(const std::wstring& path)
     return fs::exists(fs::path(path), ec);
 }
 
+bool DeleteSnapshotForPair(const SyncPair& pair, SyncLogCallback log)
+{
+    if (!pair.isBidirectional)
+    {
+        return true;
+    }
+
+    const std::wstring snapshotPath = GetSnapshotFilePath(pair.source, pair.target);
+    if (snapshotPath.empty())
+    {
+        WriteLog(log, L"[失败] 删除快照文件: 无法获取快照文件路径");
+        return false;
+    }
+
+    std::error_code ec;
+    if (!fs::exists(snapshotPath, ec))
+    {
+        return true;
+    }
+
+    fs::remove(snapshotPath, ec);
+    if (ec)
+    {
+        WriteLog(log, ErrorMessage(L"删除快照文件", snapshotPath, ec));
+        return false;
+    }
+
+    WriteLog(log, L"[删除快照] " + snapshotPath);
+    return true;
+}
+
 SyncStats SyncFolderPair(const SyncPair& pair, const SyncOptions& options, SyncLogCallback log, ProgressCallback progress)
 {
     SyncStats stats;

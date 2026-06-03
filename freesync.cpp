@@ -568,6 +568,11 @@ void RemoveSelectedSyncPair(HWND hWnd)
 
     if (index >= 0 && index < (int)gSyncPairs.size())
     {
+        const SyncPair removedPair = gSyncPairs[index];
+        DeleteSnapshotForPair(removedPair, [hWnd](const std::wstring& message)
+            {
+                AppendLog(hWnd, message);
+            });
         gSyncPairs.erase(gSyncPairs.begin() + index);
     }
     SendMessageW(hPairList, LB_DELETESTRING, index, 0);
