@@ -243,6 +243,59 @@ namespace
             }
         }
     }
+
+    void DeleteEmptyDirectories(const fs::path& root, SyncStats& stats, SyncLogCallback& log)
+    {
+        std::error_code ec;
+        if (!fs::exists(root, ec) || !fs::is_directory(root, ec))
+        {
+            return;
+        }
+
+        std::vector<fs::path> directories;
+        for (const auto& entry : fs::recursive_directory_iterator(root, fs::directory_options::skip_permission_denied, ec))
+        {
+            if (ec)
+            {
+                stats.failedFiles++;
+                WriteLog(log, ErrorMessage(L"遍历空目录", root, ec));
+                ec.clear();
+                continue;
+            }
+
+            if (entry.is_directory(ec))
+            {
+                directories.push_back(entry.path());
+            }
+            else
+            {
+                ec.clear();
+            }
+        }
+
+        for (auto it = directories.rbegin(); it != directories.rend(); ++it)
+        {
+            if (fs::is_empty(*it, ec))
+            {
+                fs::remove(*it, ec);
+                if (ec)
+                {
+                    stats.failedFiles++;
+                    WriteLog(log, ErrorMessage(L"删除空目录", *it, ec));
+                    ec.clear();
+                }
+                else
+                {
+                    stats.deletedFiles++;
+                    WriteLog(log, L"[删除空目录] " + it->wstring());
+                }
+            }
+            else
+            {
+                ec.clear();
+            }
+        }
+    }
 }
 
 namespace
@@ -616,6 +669,9 @@ SyncStats SyncFolderPair(const SyncPair& pair, const SyncOptions& options, SyncL
             f.wait();
         }
 
+        DeleteEmptyDirectories(rootA, stats, log);
+        DeleteEmptyDirectories(rootB, stats, log);
+
         SaveSnapshot(snapshotPath, currentSnapshot);
     }
     else
@@ -624,6 +680,7 @@ SyncStats SyncFolderPair(const SyncPair& pair, const SyncOptions& options, SyncL
         if (options.deleteExtraFiles)
         {
             DeleteExtraTargetFiles(rootA, rootB, stats, log);
+            DeleteEmptyDirectories(rootB, stats, log);
         }
     }
 

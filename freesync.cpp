@@ -335,12 +335,12 @@ void CreateMainControls(HWND hWnd)
     hPairList = CreateWindowW(L"LISTBOX", L"", WS_CHILD | WS_VISIBLE | WS_BORDER | WS_VSCROLL | LBS_NOTIFY,
         16, 46, 846, 180, hWnd, (HMENU)IDC_PAIR_LIST, hInst, nullptr);
 
-    hDeleteExtra = CreateWindowW(L"BUTTON", L"同步删除目标中多余文件", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
-        16, 236, 180, 24, hWnd, (HMENU)IDC_DELETE_EXTRA, hInst, nullptr);
+    hDeleteExtra = CreateWindowW(L"BUTTON", L"同步删除文件", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+        16, 236, 120, 24, hWnd, (HMENU)IDC_DELETE_EXTRA, hInst, nullptr);
     hAutoMonitor = CreateWindowW(L"BUTTON", L"开启实时监控", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
-        216, 236, 120, 24, hWnd, (HMENU)IDC_AUTO_MONITOR, hInst, nullptr);
+        156, 236, 120, 24, hWnd, (HMENU)IDC_AUTO_MONITOR, hInst, nullptr);
     CreateWindowW(L"BUTTON", L"手动同步", WS_CHILD | WS_VISIBLE,
-        356, 233, 110, 30, hWnd, (HMENU)IDC_START_SYNC, hInst, nullptr);
+        296, 233, 110, 30, hWnd, (HMENU)IDC_START_SYNC, hInst, nullptr);
 
     CreateWindowW(L"STATIC", L"日志:", WS_CHILD | WS_VISIBLE,
         16, 276, 80, 24, hWnd, nullptr, hInst, nullptr);
@@ -527,6 +527,7 @@ void ToggleMonitoring(HWND hWnd)
         {
             MessageBoxW(hWnd, L"请至少添加一组同步任务后再开启监控。", L"提示", MB_OK | MB_ICONINFORMATION);
             SendMessageW(hAutoMonitor, BM_SETCHECK, BST_UNCHECKED, 0);
+            SaveSettings();
             return;
         }
 
@@ -553,6 +554,8 @@ void ToggleMonitoring(HWND hWnd)
     else
     {
         StopMonitoring();
+
+        SaveSettings();
 
         EnableWindow(GetDlgItem(hWnd, IDC_ADD_PAIR), TRUE);
         EnableWindow(GetDlgItem(hWnd, IDC_REMOVE_PAIR), TRUE);
@@ -651,7 +654,9 @@ void LoadSettings(HWND hWnd)
 {
     const std::wstring configPath = GetConfigPath();
     const DWORD deleteExtra = GetPrivateProfileIntW(L"Settings", L"DeleteExtraFiles", 0, configPath.c_str());
+    const DWORD autoMonitor = GetPrivateProfileIntW(L"Settings", L"AutoMonitor", 0, configPath.c_str());
     SendMessageW(hDeleteExtra, BM_SETCHECK, deleteExtra ? BST_CHECKED : BST_UNCHECKED, 0);
+    SendMessageW(hAutoMonitor, BM_SETCHECK, autoMonitor ? BST_CHECKED : BST_UNCHECKED, 0);
 
     gSyncPairs.clear();
     const int count = (int)GetPrivateProfileIntW(L"Tasks", L"Count", 0, configPath.c_str());
@@ -677,6 +682,17 @@ void LoadSettings(HWND hWnd)
     {
         AppendLog(hWnd, L"已加载同步任务: " + std::to_wstring(gSyncPairs.size()) + L" 组");
     }
+
+    if (autoMonitor && !gSyncPairs.empty())
+    {
+        ToggleMonitoring(hWnd);
+    }
+    else if (autoMonitor)
+    {
+        SendMessageW(hAutoMonitor, BM_SETCHECK, BST_UNCHECKED, 0);
+        AppendLog(hWnd, L"[系统] 未找到同步任务，已取消默认开启实时监控。 ");
+        SaveSettings();
+    }
 }
 
 void SaveSettings()
@@ -684,6 +700,8 @@ void SaveSettings()
     const std::wstring configPath = GetConfigPath();
     WritePrivateProfileStringW(L"Settings", L"DeleteExtraFiles",
         SendMessageW(hDeleteExtra, BM_GETCHECK, 0, 0) == BST_CHECKED ? L"1" : L"0", configPath.c_str());
+    WritePrivateProfileStringW(L"Settings", L"AutoMonitor",
+        SendMessageW(hAutoMonitor, BM_GETCHECK, 0, 0) == BST_CHECKED ? L"1" : L"0", configPath.c_str());
     WritePrivateProfileStringW(L"Tasks", nullptr, nullptr, configPath.c_str());
     WritePrivateProfileStringW(L"Tasks", L"Count", std::to_wstring(gSyncPairs.size()).c_str(), configPath.c_str());
 
