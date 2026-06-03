@@ -543,7 +543,10 @@ void ToggleMonitoring(HWND hWnd)
         {
             std::wstring* msg = new std::wstring(message);
             PostMessageW(hWnd, WM_APPEND_LOG, (WPARAM)msg, 0);
-        }, nullptr);
+        }, [hWnd](float progress)
+        {
+            PostMessageW(hWnd, WM_UPDATE_PROGRESS, (WPARAM)(int)(progress * 100), 0);
+        });
 
         AppendLog(hWnd, L"[系统] 实时监控已开启...");
     }

@@ -212,8 +212,9 @@ namespace
             {
                 int triggeredIndex = waitResult - WAIT_OBJECT_0;
                 
-                // 找出是哪个 pair 被触发了
+                // 找出是哪个 pair 被触发了，并且是哪个路径触发的
                 int pairIndex = -1;
+                bool isTargetTriggered = false;
                 int currentHandleCount = 0;
                 for (size_t i = 0; i < pairs.size(); ++i)
                 {
@@ -221,6 +222,10 @@ namespace
                     if (triggeredIndex < currentHandleCount + handleCount)
                     {
                         pairIndex = (int)i;
+                        if (pairs[i].isBidirectional && (triggeredIndex == currentHandleCount + 1))
+                        {
+                            isTargetTriggered = true;
+                        }
                         break;
                     }
                     currentHandleCount += handleCount;
@@ -228,12 +233,12 @@ namespace
                 
                 if (pairIndex == -1) continue;
 
-                // 临时暂停监控以防止循环触发
-                g_isMonitoring = false;
+                // 消耗掉当前触发的通知，准备开始防抖等待
+                FindNextChangeNotification(handles[triggeredIndex]);
 
                 // 防抖: 循环等待直到 2 秒内没有新事件
                 bool isSettled = false;
-                while (!isSettled)
+                while (!isSettled && g_isMonitoring)
                 {
                     HANDLE waitHandles[2] = { handles[triggeredIndex], g_stopEvent };
                     DWORD debounceWait = WaitForMultipleObjects(2, waitHandles, FALSE, 2000);
@@ -244,30 +249,38 @@ namespace
                     }
                     else if (debounceWait == WAIT_OBJECT_0)
                     {
-                        FindNextChangeNotification(handles[triggeredIndex]); // 消耗掉事件并重置计时
+                        FindNextChangeNotification(handles[triggeredIndex]); // 消耗并继续等待
                     }
-                    else // 包含了收到退出信号 (WAIT_OBJECT_0 + 1) 等情况
+                    else // 收到退出信号等
                     {
                         break;
                     }
                 }
 
-                if (isSettled)
+                if (isSettled && g_isMonitoring)
                 {
                     // 记录触发变动的根目录
-                    pairs[pairIndex].triggeredRoot = (triggeredIndex % 2 == 0) ? pairs[pairIndex].source : pairs[pairIndex].target;
+                    pairs[pairIndex].triggeredRoot = isTargetTriggered ? pairs[pairIndex].target : pairs[pairIndex].source;
                     
                     WriteLog(log, L"[监控] 检测到变动，触发同步: " + pairs[pairIndex].source + L" <-> " + pairs[pairIndex].target);
                     SyncFolderPair(pairs[pairIndex], options, log, progress);
                     
-                    // 同步完成后重置
+                    // 同步完成后，清理该任务关联的所有句柄在同步期间产生的积压信号（防止反馈环路）
+                    int pairStartIdx = 0;
+                    for (int i = 0; i < pairIndex; ++i) 
+                        pairStartIdx += (pairs[i].isBidirectional ? 2 : 1);
+                    
+                    int numHandles = pairs[pairIndex].isBidirectional ? 2 : 1;
+                    for (int i = 0; i < numHandles; ++i)
+                    {
+                        while (WaitForSingleObject(handles[pairStartIdx + i], 0) == WAIT_OBJECT_0)
+                        {
+                            FindNextChangeNotification(handles[pairStartIdx + i]);
+                        }
+                    }
+
                     pairs[pairIndex].triggeredRoot = L"";
                 }
-
-                // 恢复监控
-                g_isMonitoring = true;
-
-                FindNextChangeNotification(handles[triggeredIndex]);
             }
             else if (waitResult == WAIT_OBJECT_0 + handles.size() - 1)
             {
@@ -321,100 +334,77 @@ bool IsPathAvailable(const std::wstring& path)
 SyncStats SyncFolderPair(const SyncPair& pair, const SyncOptions& options, SyncLogCallback log, ProgressCallback progress)
 {
     SyncStats stats;
-    const fs::path sourceRoot(pair.source);
-    const fs::path targetRoot(pair.target);
+    const fs::path rootA(pair.source);
+    const fs::path rootB(pair.target);
 
-    // 只有非双向时或者明确知道是源触发时才执行 src -> tgt
-    // 对于双向同步，如果目标改变，我们要精准执行 tgt -> src
-    // 增加参数标识哪个路径触发了变动
+    // 统一同步逻辑：从 src 同步到 dst
     auto syncOneWay = [&](const fs::path& src, const fs::path& tgt)
     {
-        // 预遍历计算总数
-        size_t totalFiles = 0;
-        {
-            std::error_code ec;
-            for (const auto& _ : fs::recursive_directory_iterator(src, fs::directory_options::skip_permission_denied, ec))
-                totalFiles++;
-        }
-        size_t processedFiles = 0;
-
-        WriteLog(log, L"开始同步: " + src.wstring() + L" -> " + tgt.wstring());
-
         std::error_code ec;
-        if (!fs::exists(src, ec) || !fs::is_directory(src, ec))
-        {
-            ++stats.failedFiles;
-            WriteLog(log, L"[失败] 源目录不存在或不可访问: " + src.wstring());
-            return;
-        }
-
+        if (!fs::exists(src, ec) || !fs::is_directory(src, ec)) return;
         fs::create_directories(tgt, ec);
-        if (ec)
-        {
-            ++stats.failedFiles;
-            WriteLog(log, ErrorMessage(L"创建目标目录", tgt, ec));
-            return;
-        }
 
+        // 统计总文件数用于计算进度
+        size_t totalItems = 0;
         for (const auto& entry : fs::recursive_directory_iterator(src, fs::directory_options::skip_permission_denied, ec))
         {
-            if (ec)
-            {
-                ++stats.failedFiles;
-                WriteLog(log, ErrorMessage(L"遍历源目录", src, ec));
-                ec.clear();
-                continue;
-            }
+            if (!ec) totalItems++;
+            else ec.clear();
+        }
 
-            processedFiles++;
+        size_t processedItems = 0;
+        for (const auto& entry : fs::recursive_directory_iterator(src, fs::directory_options::skip_permission_denied, ec))
+        {
+            if (ec) { ec.clear(); continue; }
+
             const fs::path relativePath = fs::relative(entry.path(), src, ec);
-            if (ec)
-            {
-                ++stats.failedFiles;
-                WriteLog(log, ErrorMessage(L"计算相对路径", entry.path(), ec));
-                ec.clear();
-                continue;
-            }
-
             const fs::path targetPath = tgt / relativePath;
+            
             if (entry.is_directory(ec))
             {
                 fs::create_directories(targetPath, ec);
-                if (ec)
-                {
-                    ++stats.failedFiles;
-                    WriteLog(log, ErrorMessage(L"创建目录", targetPath, ec));
-                    ec.clear();
-                }
             }
             else if (entry.is_regular_file(ec))
             {
                 CopyFileIncremental(entry.path(), targetPath, stats, log);
             }
-            
-            if (totalFiles > 0 && progress)
-                progress((float)processedFiles / totalFiles);
-        }
 
-        if (options.deleteExtraFiles)
-        {
-            DeleteExtraTargetFiles(src, tgt, stats, log);
+            processedItems++;
+            if (progress && totalItems > 0)
+            {
+                progress((float)processedItems / totalItems);
+            }
         }
     };
 
-    if (pair.isBidirectional && pair.triggeredRoot == pair.target)
+    WriteLog(log, L"开始同步: " + rootA.wstring() + L" <-> " + rootB.wstring());
+
+    if (pair.isBidirectional)
     {
-        // 如果是双向并且目标触发，则只需 tgt -> src
-        syncOneWay(targetRoot, sourceRoot);
+        // 双向同步：优先同步有变动的一侧
+        const bool targetTriggered = (!pair.triggeredRoot.empty() && pair.triggeredRoot == rootB.wstring());
+        
+        if (targetTriggered)
+        {
+            syncOneWay(rootB, rootA);
+            if (options.deleteExtraFiles) DeleteExtraTargetFiles(rootB, rootA, stats, log);
+            syncOneWay(rootA, rootB);
+            if (options.deleteExtraFiles) DeleteExtraTargetFiles(rootA, rootB, stats, log);
+        }
+        else
+        {
+            syncOneWay(rootA, rootB);
+            if (options.deleteExtraFiles) DeleteExtraTargetFiles(rootA, rootB, stats, log);
+            syncOneWay(rootB, rootA);
+            if (options.deleteExtraFiles) DeleteExtraTargetFiles(rootB, rootA, stats, log);
+        }
     }
     else
     {
-        // 默认总是 src -> tgt
-        syncOneWay(sourceRoot, targetRoot);
-        // 如果是双向，再 tgt -> src
-        if (pair.isBidirectional)
+        syncOneWay(rootA, rootB);
+        if (options.deleteExtraFiles)
         {
-            syncOneWay(targetRoot, sourceRoot);
+            DeleteExtraTargetFiles(rootA, rootB, stats, log);
         }
     }
 
