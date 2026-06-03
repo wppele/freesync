@@ -337,10 +337,10 @@ void CreateMainControls(HWND hWnd)
 
     hDeleteExtra = CreateWindowW(L"BUTTON", L"同步删除文件", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
         16, 236, 120, 24, hWnd, (HMENU)IDC_DELETE_EXTRA, hInst, nullptr);
-    hAutoMonitor = CreateWindowW(L"BUTTON", L"开启实时监控", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
-        156, 236, 120, 24, hWnd, (HMENU)IDC_AUTO_MONITOR, hInst, nullptr);
+    hAutoMonitor = CreateWindowW(L"BUTTON", L"实时同步", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+        156, 236, 90, 24, hWnd, (HMENU)IDC_AUTO_MONITOR, hInst, nullptr);
     CreateWindowW(L"BUTTON", L"手动同步", WS_CHILD | WS_VISIBLE,
-        296, 233, 110, 30, hWnd, (HMENU)IDC_START_SYNC, hInst, nullptr);
+        266, 233, 110, 30, hWnd, (HMENU)IDC_START_SYNC, hInst, nullptr);
 
     CreateWindowW(L"STATIC", L"日志:", WS_CHILD | WS_VISIBLE,
         16, 276, 80, 24, hWnd, nullptr, hInst, nullptr);
@@ -643,7 +643,7 @@ void ToggleMonitoring(HWND hWnd)
             PostMessageW(hWnd, WM_UPDATE_PROGRESS, (WPARAM)(int)(progress * 100), 0);
         });
 
-        AppendLog(hWnd, L"[系统] 实时监控已开启...");
+        AppendLog(hWnd, L"[系统] 实时同步已开启...");
     }
     else
     {
@@ -656,7 +656,7 @@ void ToggleMonitoring(HWND hWnd)
         EnableWindow(GetDlgItem(hWnd, IDC_START_SYNC), TRUE);
         EnableWindow(hDeleteExtra, TRUE);
 
-        AppendLog(hWnd, L"[系统] 实时监控已关闭。");
+        AppendLog(hWnd, L"[系统] 实时同步已关闭。");
     }
 }
 
@@ -691,7 +691,7 @@ void SetupTrayIcon(HWND hWnd)
     {
         nid.hIcon = LoadIcon(nullptr, IDI_APPLICATION); // 如果加载失败，使用系统默认图标
     }
-    wcscpy_s(nid.szTip, L"FreeSync 实时监控中");
+    wcscpy_s(nid.szTip, L"FreeSync 实时同步中");
     Shell_NotifyIconW(NIM_ADD, &nid);
 }
 
@@ -784,7 +784,7 @@ void LoadSettings(HWND hWnd)
     else if (autoMonitor)
     {
         SendMessageW(hAutoMonitor, BM_SETCHECK, BST_UNCHECKED, 0);
-        AppendLog(hWnd, L"[系统] 未找到同步任务，已取消默认开启实时监控。 ");
+        AppendLog(hWnd, L"[系统] 未找到同步任务，已取消默认开启实时同步。 ");
         SaveSettings();
     }
 }
