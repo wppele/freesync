@@ -6,6 +6,14 @@
 #include <vector>
 #include <atomic>
 #include <mutex>
+#include <unordered_map>
+
+struct FileSnapshot {
+    uintmax_t size;
+    long long lastWriteTime;
+};
+
+using SnapshotMap = std::unordered_map<std::wstring, FileSnapshot>;
 
 struct SyncPair
 {
@@ -22,10 +30,24 @@ struct SyncOptions
 
 struct SyncStats
 {
-    unsigned long long copiedFiles = 0;
-    unsigned long long skippedFiles = 0;
-    unsigned long long deletedFiles = 0;
-    unsigned long long failedFiles = 0;
+    std::atomic<unsigned long long> copiedFiles{0};
+    std::atomic<unsigned long long> skippedFiles{0};
+    std::atomic<unsigned long long> deletedFiles{0};
+    std::atomic<unsigned long long> failedFiles{0};
+
+    SyncStats() = default;
+    SyncStats(const SyncStats& o) : 
+        copiedFiles(o.copiedFiles.load()), 
+        skippedFiles(o.skippedFiles.load()), 
+        deletedFiles(o.deletedFiles.load()), 
+        failedFiles(o.failedFiles.load()) {}
+    SyncStats& operator=(const SyncStats& o) {
+        copiedFiles = o.copiedFiles.load();
+        skippedFiles = o.skippedFiles.load();
+        deletedFiles = o.deletedFiles.load();
+        failedFiles = o.failedFiles.load();
+        return *this;
+    }
 };
 
 using SyncLogCallback = std::function<void(const std::wstring&)>;
