@@ -25,6 +25,7 @@
 #define IDC_ADD_PAIR 1005
 #define IDC_REMOVE_PAIR 1006
 #define IDC_PAIR_LIST 1007
+#define IDC_SYNC_LIST 1007
 #define IDC_DELETE_EXTRA 1008
 #define IDC_START_SYNC 1009
 #define IDC_LOG_EDIT 1010
@@ -75,6 +76,7 @@ void                SetupTrayIcon(HWND hWnd);
 void                RemoveTrayIcon();
 void                ApplyMainFont(HWND hWnd);
 void                RefreshPairList();
+void                StartSinglePairSync(HWND hWnd, int index);
 std::wstring        GetConfigPath();
 bool                PrepareSyncPairsForUse(HWND hWnd, bool showMessageOnFailure);
 void                LoadSettings(HWND hWnd);
@@ -230,6 +232,26 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
             }
         }
         break;
+    case WM_NOTIFY:
+    {
+        LPNMHDR pnmh = (LPNMHDR)lParam;
+        if (pnmh->idFrom == IDC_SYNC_LIST && pnmh->code == NM_DBLCLK)
+        {
+            // 如果实时同步已开启，则禁止手动双击同步
+            if (SendMessageW(hAutoMonitor, BM_GETCHECK, 0, 0) == BST_CHECKED)
+            {
+                MessageBoxW(hWnd, L"实时同步状态下此功能无效", L"提示", MB_OK | MB_ICONINFORMATION);
+                return 0;
+            }
+
+            LPNMLISTVIEW pnmv = (LPNMLISTVIEW)lParam;
+            if (pnmv->iItem != -1)
+            {
+                StartSinglePairSync(hWnd, pnmv->iItem);
+            }
+        }
+        break;
+    }
     case WM_PAINT:
         {
             PAINTSTRUCT ps;
@@ -248,7 +270,6 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
     case WM_SYNC_COMPLETE:
     {
         EnableWindow(GetDlgItem(hWnd, IDC_START_SYNC), TRUE);
-        MessageBoxW(hWnd, L"同步完成，请查看日志。", L"完成", MB_OK | MB_ICONINFORMATION);
         return 0;
     }
     case WM_UPDATE_PROGRESS:
@@ -333,8 +354,19 @@ void CreateMainControls(HWND hWnd)
     CreateWindowW(L"BUTTON", L"➖", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
         136, 14, 30, 24, hWnd, (HMENU)IDC_REMOVE_PAIR, hInst, nullptr);
 
-    hPairList = CreateWindowW(L"LISTBOX", L"", WS_CHILD | WS_VISIBLE | WS_BORDER | WS_VSCROLL | LBS_NOTIFY,
-        16, 46, 846, 180, hWnd, (HMENU)IDC_PAIR_LIST, hInst, nullptr);
+    hPairList = CreateWindowW(WC_LISTVIEWW, L"", WS_CHILD | WS_VISIBLE | WS_BORDER | LVS_REPORT | LVS_SINGLESEL,
+        16, 46, 846, 180, hWnd, (HMENU)IDC_SYNC_LIST, hInst, nullptr);
+    SendMessageW(hPairList, LVM_SETEXTENDEDLISTVIEWSTYLE, 0, LVS_EX_FULLROWSELECT | LVS_EX_GRIDLINES);
+
+    LVCOLUMNW lvc = { 0 };
+    lvc.mask = LVCF_TEXT | LVCF_WIDTH | LVCF_SUBITEM;
+    lvc.pszText = (LPWSTR)L"同步任务";
+    lvc.cx = 650;
+    ListView_InsertColumn(hPairList, 0, &lvc);
+
+    lvc.pszText = (LPWSTR)L"操作";
+    lvc.cx = 150;
+    ListView_InsertColumn(hPairList, 1, &lvc);
 
     hDeleteExtra = CreateWindowW(L"BUTTON", L"同步删除文件", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
         16, 236, 120, 24, hWnd, (HMENU)IDC_DELETE_EXTRA, hInst, nullptr);
@@ -525,6 +557,7 @@ INT_PTR CALLBACK AddPairDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM l
                 display = source + L"  <->  " + target;
             }
             SendMessageW(hPairList, LB_ADDSTRING, 0, (LPARAM)display.c_str());
+            RefreshPairList();
             SaveSettings();
             AppendLog(GetParent(hDlg), L"[添加任务] " + display);
             
@@ -561,8 +594,8 @@ INT_PTR CALLBACK AddPairDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM l
 
 void RemoveSelectedSyncPair(HWND hWnd)
 {
-    const int index = (int)SendMessageW(hPairList, LB_GETCURSEL, 0, 0);
-    if (index == LB_ERR)
+    const int index = ListView_GetNextItem(hPairList, -1, LVNI_SELECTED);
+    if (index == -1)
     {
         MessageBoxW(hWnd, L"请先在任务列表中选择一个任务。", L"提示", MB_OK | MB_ICONINFORMATION);
         return;
@@ -577,7 +610,7 @@ void RemoveSelectedSyncPair(HWND hWnd)
             });
         gSyncPairs.erase(gSyncPairs.begin() + index);
     }
-    SendMessageW(hPairList, LB_DELETESTRING, index, 0);
+    RefreshPairList();
     SaveSettings();
     AppendLog(hWnd, L"[删除任务] 已删除选中同步任务");
 }
@@ -615,6 +648,39 @@ void StartSync(HWND hWnd)
             });
 
         PostMessageW(hWnd, WM_SYNC_COMPLETE, 0, 0); // 通知同步完成
+    }).detach();
+}
+
+void StartSinglePairSync(HWND hWnd, int index)
+{
+    if (index < 0 || index >= (int)gSyncPairs.size()) return;
+
+    if (!PrepareSyncPairsForUse(hWnd, true))
+    {
+        return;
+    }
+
+    EnableWindow(GetDlgItem(hWnd, IDC_START_SYNC), FALSE);
+    SendMessageW(hProgressBar, PBM_SETPOS, 0, 0);
+    AppendLog(hWnd, L"[系统] 开始同步单项任务...");
+
+    SyncPair pair = gSyncPairs[index];
+
+    std::thread([hWnd, pair]() {
+        SyncOptions options;
+        options.deleteExtraFiles = SendMessageW(hDeleteExtra, BM_GETCHECK, 0, 0) == BST_CHECKED;
+        SaveSettings();
+
+        SyncFolderPair(pair, options, [hWnd](const std::wstring& message)
+            {
+                std::wstring* msg = new std::wstring(message);
+                PostMessageW(hWnd, WM_APPEND_LOG, (WPARAM)msg, 0);
+            }, [hWnd](float progress)
+            {
+                PostMessageW(hWnd, WM_UPDATE_PROGRESS, (WPARAM)(int)(progress * 100), 0);
+            });
+
+        PostMessageW(hWnd, WM_SYNC_COMPLETE, 0, 0);
     }).detach();
 }
 
@@ -733,15 +799,24 @@ void ApplyMainFont(HWND hWnd)
 
 void RefreshPairList()
 {
-    SendMessageW(hPairList, LB_RESETCONTENT, 0, 0);
-    for (const auto& pair : gSyncPairs)
+    ListView_DeleteAllItems(hPairList);
+    for (int i = 0; i < (int)gSyncPairs.size(); ++i)
     {
+        const auto& pair = gSyncPairs[i];
         std::wstring display = pair.source + L"  ->  " + pair.target;
         if (pair.isBidirectional)
         {
             display = pair.source + L"  <->  " + pair.target;
         }
-        SendMessageW(hPairList, LB_ADDSTRING, 0, (LPARAM)display.c_str());
+
+        LVITEMW lvi = { 0 };
+        lvi.mask = LVIF_TEXT | LVIF_PARAM;
+        lvi.iItem = i;
+        lvi.iSubItem = 0;
+        lvi.pszText = (LPWSTR)display.c_str();
+        lvi.lParam = (LPARAM)i;
+        ListView_InsertItem(hPairList, &lvi);
+        ListView_SetItemText(hPairList, i, 1, (LPWSTR)L"[双击同步此项]");
     }
 }
 
