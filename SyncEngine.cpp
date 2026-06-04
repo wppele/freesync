@@ -224,7 +224,7 @@ namespace
 
         if (volumeGuid.empty())
         {
-            WriteLog(log, L"[路径恢复失败] " + label + L"缺少卷标识: " + path);
+            WriteLog(log, L"[路径不可用] " + label + L": " + path + L" (缺少卷标识，无法自动恢复)");
             return false;
         }
 
@@ -238,7 +238,7 @@ namespace
             {
                 if (candidate != path)
                 {
-                    WriteLog(log, L"[路径恢复] " + label + L": " + path + L" -> " + candidate);
+                    WriteLog(log, L"[路径已恢复] " + label + L": " + path + L" -> " + candidate);
                     path = candidate;
                 }
                 return true;
@@ -246,7 +246,7 @@ namespace
             ec.clear();
         }
 
-        WriteLog(log, L"[路径恢复失败] " + label + L"未找到可用路径，请插入对应磁盘或重新添加任务: " + path);
+        WriteLog(log, L"[路径不可用] " + label + L": " + path + L" (请检查磁盘是否已插入)");
         return false;
     }
 
@@ -558,27 +558,44 @@ namespace
 
                 if (isSettled && g_isMonitoring)
                 {
-                    // 记录触发变动的根目录
-                    pairs[pairIndex].triggeredRoot = isTargetTriggered ? pairs[pairIndex].target : pairs[pairIndex].source;
-                    
-                    WriteLog(log, L"[监控] 检测到变动，触发同步: " + pairs[pairIndex].source + L" <-> " + pairs[pairIndex].target);
-                    SyncFolderPair(pairs[pairIndex], options, log, progress);
-                    
-                    // 同步完成后，清理该任务关联的所有句柄在同步期间产生的积压信号（防止反馈环路）
-                    int pairStartIdx = 0;
-                    for (int i = 0; i < pairIndex; ++i) 
-                        pairStartIdx += (pairs[i].isBidirectional ? 2 : 1);
-                    
-                    int numHandles = pairs[pairIndex].isBidirectional ? 2 : 1;
-                    for (int i = 0; i < numHandles; ++i)
-                    {
-                        while (WaitForSingleObject(handles[pairStartIdx + i], 0) == WAIT_OBJECT_0)
+                    try {
+                        // 重新尝试恢复路径（以防磁盘刚插入）
+                        if (!TryResolveSyncPairPaths(pairs[pairIndex], log))
                         {
-                            FindNextChangeNotification(handles[pairStartIdx + i]);
+                            WriteLog(log, L"[监控跳过] 任务路径不可用且无法恢复: " + pairs[pairIndex].source + L" -> " + pairs[pairIndex].target);
+                            continue;
                         }
-                    }
 
-                    pairs[pairIndex].triggeredRoot = L"";
+                        // 记录触发变动的根目录
+                        pairs[pairIndex].triggeredRoot = isTargetTriggered ? pairs[pairIndex].target : pairs[pairIndex].source;
+                        
+                        WriteLog(log, L"[监控] 检测到变动，触发同步: " + pairs[pairIndex].source + L" <-> " + pairs[pairIndex].target);
+                        SyncFolderPair(pairs[pairIndex], options, log, progress);
+                        
+                        // 同步完成后，清理该任务关联的所有句柄在同步期间产生的积压信号（防止反馈环路）
+                        int pairStartIdx = 0;
+                        for (int i = 0; i < pairIndex; ++i) 
+                            pairStartIdx += (pairs[i].isBidirectional ? 2 : 1);
+                        
+                        int numHandles = pairs[pairIndex].isBidirectional ? 2 : 1;
+                        for (int i = 0; i < numHandles; ++i)
+                        {
+                            while (WaitForSingleObject(handles[pairStartIdx + i], 0) == WAIT_OBJECT_0)
+                            {
+                                FindNextChangeNotification(handles[pairStartIdx + i]);
+                            }
+                        }
+
+                        pairs[pairIndex].triggeredRoot = L"";
+                    }
+                    catch (const std::exception& e)
+                    {
+                        WriteLog(log, L"[监控异常] 同步任务时出错: " + std::wstring(e.what(), e.what() + strlen(e.what())));
+                    }
+                    catch (...)
+                    {
+                        WriteLog(log, L"[监控异常] 同步任务时发生未知错误");
+                    }
                 }
             }
             else if (waitResult == WAIT_OBJECT_0 + handles.size() - 1)
@@ -725,8 +742,25 @@ bool DeleteSnapshotForPair(const SyncPair& pair, SyncLogCallback log)
 SyncStats SyncFolderPair(const SyncPair& pair, const SyncOptions& options, SyncLogCallback log, ProgressCallback progress)
 {
     SyncStats stats;
+    std::error_code ec;
     const fs::path rootA(pair.source);
     const fs::path rootB(pair.target);
+
+    if (!fs::exists(rootA, ec))
+    {
+        WriteLog(log, L"[同步跳过] 源目录不存在: " + rootA.wstring());
+        return stats;
+    }
+    ec.clear();
+    if (!fs::exists(rootB, ec))
+    {
+        fs::create_directories(rootB, ec);
+        if (ec)
+        {
+            WriteLog(log, L"[同步失败] 无法创建目标目录: " + rootB.wstring());
+            return stats;
+        }
+    }
 
     // 统一同步逻辑：从 src 同步到 dst
     auto syncOneWay = [&](const fs::path& src, const fs::path& tgt)

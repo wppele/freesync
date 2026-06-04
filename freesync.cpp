@@ -79,6 +79,7 @@ void                RefreshPairList();
 void                StartSinglePairSync(HWND hWnd, int index);
 std::wstring        GetConfigPath();
 bool                PrepareSyncPairsForUse(HWND hWnd, bool showMessageOnFailure);
+bool                CheckAndRecoverSinglePair(HWND hWnd, int index, bool showMessageOnFailure);
 void                LoadSettings(HWND hWnd);
 void                SaveSettings();
 
@@ -623,10 +624,8 @@ void StartSync(HWND hWnd)
         return;
     }
 
-    if (!PrepareSyncPairsForUse(hWnd, true))
-    {
-        return;
-    }
+    // 检查并尝试恢复路径，即使有失败也继续尝试同步其他正常的任务
+    PrepareSyncPairsForUse(hWnd, true);
 
     EnableWindow(GetDlgItem(hWnd, IDC_START_SYNC), FALSE);
     SendMessageW(hProgressBar, PBM_SETPOS, 0, 0);
@@ -655,7 +654,7 @@ void StartSinglePairSync(HWND hWnd, int index)
 {
     if (index < 0 || index >= (int)gSyncPairs.size()) return;
 
-    if (!PrepareSyncPairsForUse(hWnd, true))
+    if (!CheckAndRecoverSinglePair(hWnd, index, true))
     {
         return;
     }
@@ -698,12 +697,8 @@ void ToggleMonitoring(HWND hWnd)
             return;
         }
 
-        if (!PrepareSyncPairsForUse(hWnd, true))
-        {
-            SendMessageW(hAutoMonitor, BM_SETCHECK, BST_UNCHECKED, 0);
-            SaveSettings();
-            return;
-        }
+        // 尝试恢复路径，即使有失败也允许开启监控（监控线程内部会重试）
+        PrepareSyncPairsForUse(hWnd, true);
 
         EnableWindow(GetDlgItem(hWnd, IDC_ADD_PAIR), FALSE);
         EnableWindow(GetDlgItem(hWnd, IDC_REMOVE_PAIR), FALSE);
@@ -856,10 +851,48 @@ bool PrepareSyncPairsForUse(HWND hWnd, bool showMessageOnFailure)
 
     if (!allOk && showMessageOnFailure)
     {
-        MessageBoxW(hWnd, L"部分同步任务路径不可用，且无法根据磁盘标识自动恢复。请插入对应磁盘或重新添加任务。", L"路径不可用", MB_OK | MB_ICONWARNING);
+        std::wstring error = L"部分同步任务路径不可用，请检查以下任务是否已连接对应磁盘：\n\n";
+        for (const auto& pair : gSyncPairs)
+        {
+            std::error_code ec;
+            if (!std::filesystem::exists(pair.source, ec) || !std::filesystem::exists(pair.target, ec))
+            {
+                error += L"• " + pair.source + L" -> " + pair.target + L"\n";
+            }
+        }
+        MessageBoxW(hWnd, error.c_str(), L"路径不可用", MB_OK | MB_ICONWARNING);
     }
 
     return allOk;
+}
+
+bool CheckAndRecoverSinglePair(HWND hWnd, int index, bool showMessageOnFailure)
+{
+    if (index < 0 || index >= (int)gSyncPairs.size()) return false;
+
+    SyncPair& pair = gSyncPairs[index];
+    std::wstring oldSource = pair.source;
+    std::wstring oldTarget = pair.target;
+
+    bool ok = TryResolveSyncPairPaths(pair, [hWnd](const std::wstring& message) {
+        AppendLog(hWnd, message);
+    });
+
+    if (pair.source != oldSource || pair.target != oldTarget)
+    {
+        RefreshPairList();
+        SaveSettings();
+    }
+
+    if (!ok && showMessageOnFailure)
+    {
+        std::wstring error = L"任务路径不可用：\n";
+        error += L"源: " + oldSource + L"\n";
+        error += L"目标: " + oldTarget + L"\n\n请确保相关磁盘已插入。";
+        MessageBoxW(hWnd, error.c_str(), L"路径错误", MB_OK | MB_ICONWARNING);
+    }
+
+    return ok;
 }
 
 std::wstring GetConfigPath()
