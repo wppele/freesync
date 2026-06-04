@@ -76,6 +76,7 @@ void                RemoveTrayIcon();
 void                ApplyMainFont(HWND hWnd);
 void                RefreshPairList();
 std::wstring        GetConfigPath();
+bool                PrepareSyncPairsForUse(HWND hWnd, bool showMessageOnFailure);
 void                LoadSettings(HWND hWnd);
 void                SaveSettings();
 
@@ -516,6 +517,7 @@ INT_PTR CALLBACK AddPairDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM l
             }
 
             SyncPair pair{ source, target, isBidirectional };
+            CaptureSyncPairVolumeInfo(pair);
             gSyncPairs.push_back(pair);
             std::wstring display = source + L"  ->  " + target;
             if (isBidirectional)
@@ -588,6 +590,11 @@ void StartSync(HWND hWnd)
         return;
     }
 
+    if (!PrepareSyncPairsForUse(hWnd, true))
+    {
+        return;
+    }
+
     EnableWindow(GetDlgItem(hWnd, IDC_START_SYNC), FALSE);
     SendMessageW(hProgressBar, PBM_SETPOS, 0, 0);
     AppendLog(hWnd, L"[系统] 同步开始...");
@@ -620,6 +627,13 @@ void ToggleMonitoring(HWND hWnd)
         if (gSyncPairs.empty())
         {
             MessageBoxW(hWnd, L"请至少添加一组同步任务后再开启监控。", L"提示", MB_OK | MB_ICONINFORMATION);
+            SendMessageW(hAutoMonitor, BM_SETCHECK, BST_UNCHECKED, 0);
+            SaveSettings();
+            return;
+        }
+
+        if (!PrepareSyncPairsForUse(hWnd, true))
+        {
             SendMessageW(hAutoMonitor, BM_SETCHECK, BST_UNCHECKED, 0);
             SaveSettings();
             return;
@@ -731,6 +745,48 @@ void RefreshPairList()
     }
 }
 
+bool PrepareSyncPairsForUse(HWND hWnd, bool showMessageOnFailure)
+{
+    bool changed = false;
+    std::vector<std::wstring> originalSources;
+    std::vector<std::wstring> originalTargets;
+    originalSources.reserve(gSyncPairs.size());
+    originalTargets.reserve(gSyncPairs.size());
+
+    for (const auto& pair : gSyncPairs)
+    {
+        originalSources.push_back(pair.source);
+        originalTargets.push_back(pair.target);
+    }
+
+    const bool allOk = ResolveSyncPairPaths(gSyncPairs, [hWnd](const std::wstring& message)
+        {
+            AppendLog(hWnd, message);
+        });
+
+    for (size_t i = 0; i < gSyncPairs.size(); ++i)
+    {
+        if (gSyncPairs[i].source != originalSources[i] || gSyncPairs[i].target != originalTargets[i])
+        {
+            changed = true;
+            break;
+        }
+    }
+
+    if (changed)
+    {
+        RefreshPairList();
+        SaveSettings();
+    }
+
+    if (!allOk && showMessageOnFailure)
+    {
+        MessageBoxW(hWnd, L"部分同步任务路径不可用，且无法根据磁盘标识自动恢复。请插入对应磁盘或重新添加任务。", L"路径不可用", MB_OK | MB_ICONWARNING);
+    }
+
+    return allOk;
+}
+
 std::wstring GetConfigPath()
 {
     WCHAR appData[MAX_PATH]{};
@@ -758,16 +814,38 @@ void LoadSettings(HWND hWnd)
     {
         WCHAR source[MAX_PATH * 4]{};
         WCHAR target[MAX_PATH * 4]{};
+        WCHAR sourceVolumeGuid[MAX_PATH * 4]{};
+        WCHAR sourceRelativePath[MAX_PATH * 4]{};
+        WCHAR targetVolumeGuid[MAX_PATH * 4]{};
+        WCHAR targetRelativePath[MAX_PATH * 4]{};
         const std::wstring sourceKey = L"Source" + std::to_wstring(i);
         const std::wstring targetKey = L"Target" + std::to_wstring(i);
         const std::wstring bidirKey = L"Bidirectional" + std::to_wstring(i);
+        const std::wstring sourceVolumeGuidKey = L"SourceVolumeGuid" + std::to_wstring(i);
+        const std::wstring sourceRelativePathKey = L"SourceRelativePath" + std::to_wstring(i);
+        const std::wstring targetVolumeGuidKey = L"TargetVolumeGuid" + std::to_wstring(i);
+        const std::wstring targetRelativePathKey = L"TargetRelativePath" + std::to_wstring(i);
         GetPrivateProfileStringW(L"Tasks", sourceKey.c_str(), L"", source, ARRAYSIZE(source), configPath.c_str());
         GetPrivateProfileStringW(L"Tasks", targetKey.c_str(), L"", target, ARRAYSIZE(target), configPath.c_str());
+        GetPrivateProfileStringW(L"Tasks", sourceVolumeGuidKey.c_str(), L"", sourceVolumeGuid, ARRAYSIZE(sourceVolumeGuid), configPath.c_str());
+        GetPrivateProfileStringW(L"Tasks", sourceRelativePathKey.c_str(), L"", sourceRelativePath, ARRAYSIZE(sourceRelativePath), configPath.c_str());
+        GetPrivateProfileStringW(L"Tasks", targetVolumeGuidKey.c_str(), L"", targetVolumeGuid, ARRAYSIZE(targetVolumeGuid), configPath.c_str());
+        GetPrivateProfileStringW(L"Tasks", targetRelativePathKey.c_str(), L"", targetRelativePath, ARRAYSIZE(targetRelativePath), configPath.c_str());
         const int isBidir = GetPrivateProfileIntW(L"Tasks", bidirKey.c_str(), 0, configPath.c_str());
         if (source[0] != L'\0' && target[0] != L'\0')
         {
-            gSyncPairs.push_back(SyncPair{ source, target, isBidir != 0 });
+            SyncPair pair{ source, target, isBidir != 0 };
+            pair.sourceVolumeGuid = sourceVolumeGuid;
+            pair.sourceRelativePath = sourceRelativePath;
+            pair.targetVolumeGuid = targetVolumeGuid;
+            pair.targetRelativePath = targetRelativePath;
+            gSyncPairs.push_back(pair);
         }
+    }
+
+    if (!gSyncPairs.empty())
+    {
+        PrepareSyncPairsForUse(hWnd, false);
     }
 
     RefreshPairList();
@@ -804,9 +882,17 @@ void SaveSettings()
         const std::wstring sourceKey = L"Source" + std::to_wstring(i);
         const std::wstring targetKey = L"Target" + std::to_wstring(i);
         const std::wstring bidirKey = L"Bidirectional" + std::to_wstring(i);
+        const std::wstring sourceVolumeGuidKey = L"SourceVolumeGuid" + std::to_wstring(i);
+        const std::wstring sourceRelativePathKey = L"SourceRelativePath" + std::to_wstring(i);
+        const std::wstring targetVolumeGuidKey = L"TargetVolumeGuid" + std::to_wstring(i);
+        const std::wstring targetRelativePathKey = L"TargetRelativePath" + std::to_wstring(i);
         WritePrivateProfileStringW(L"Tasks", sourceKey.c_str(), gSyncPairs[i].source.c_str(), configPath.c_str());
         WritePrivateProfileStringW(L"Tasks", targetKey.c_str(), gSyncPairs[i].target.c_str(), configPath.c_str());
         WritePrivateProfileStringW(L"Tasks", bidirKey.c_str(), gSyncPairs[i].isBidirectional ? L"1" : L"0", configPath.c_str());
+        WritePrivateProfileStringW(L"Tasks", sourceVolumeGuidKey.c_str(), gSyncPairs[i].sourceVolumeGuid.c_str(), configPath.c_str());
+        WritePrivateProfileStringW(L"Tasks", sourceRelativePathKey.c_str(), gSyncPairs[i].sourceRelativePath.c_str(), configPath.c_str());
+        WritePrivateProfileStringW(L"Tasks", targetVolumeGuidKey.c_str(), gSyncPairs[i].targetVolumeGuid.c_str(), configPath.c_str());
+        WritePrivateProfileStringW(L"Tasks", targetRelativePathKey.c_str(), gSyncPairs[i].targetRelativePath.c_str(), configPath.c_str());
     }
 }
 

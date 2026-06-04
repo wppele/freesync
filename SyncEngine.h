@@ -11,6 +11,7 @@
 struct FileSnapshot {
     uintmax_t size;
     long long lastWriteTime;
+    bool isDirectory = false;
 };
 
 using SnapshotMap = std::unordered_map<std::wstring, FileSnapshot>;
@@ -20,6 +21,10 @@ struct SyncPair
     std::wstring source;
     std::wstring target;
     bool isBidirectional = false; // Add bidirectional flag
+    std::wstring sourceVolumeGuid;
+    std::wstring sourceRelativePath;
+    std::wstring targetVolumeGuid;
+    std::wstring targetRelativePath;
     std::wstring triggeredRoot; // 记录最近一次变动的根目录
 };
 
@@ -59,6 +64,9 @@ void StopMonitoring();
 bool IsMonitoring();
 
 bool IsPathAvailable(const std::wstring& path);
+bool CaptureSyncPairVolumeInfo(SyncPair& pair);
+bool TryResolveSyncPairPaths(SyncPair& pair, SyncLogCallback log = nullptr);
+bool ResolveSyncPairPaths(std::vector<SyncPair>& pairs, SyncLogCallback log = nullptr);
 bool DeleteSnapshotForPair(const SyncPair& pair, SyncLogCallback log = nullptr);
 SyncStats SyncFolderPair(const SyncPair& pair, const SyncOptions& options, SyncLogCallback log, ProgressCallback progress);
 SyncStats SyncFolderPairs(const std::vector<SyncPair>& pairs, const SyncOptions& options, SyncLogCallback log, ProgressCallback progress);

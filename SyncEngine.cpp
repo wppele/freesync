@@ -2,6 +2,7 @@
 #include "SyncEngine.h"
 
 #include <chrono>
+#include <algorithm>
 #include <fstream>
 #include <sstream>
 #include <thread>
@@ -32,6 +33,20 @@ namespace
         return L"";
     }
 
+    std::wstring GetSnapshotFilePath(const SyncPair& pair)
+    {
+        const bool hasStableSource = !pair.sourceVolumeGuid.empty() && !pair.sourceRelativePath.empty();
+        const bool hasStableTarget = !pair.targetVolumeGuid.empty() && !pair.targetRelativePath.empty();
+        if (hasStableSource && hasStableTarget)
+        {
+            return GetSnapshotFilePath(
+                pair.sourceVolumeGuid + L"|" + pair.sourceRelativePath,
+                pair.targetVolumeGuid + L"|" + pair.targetRelativePath);
+        }
+
+        return GetSnapshotFilePath(pair.source, pair.target);
+    }
+
     SnapshotMap LoadSnapshot(const std::wstring& filePath)
     {
         SnapshotMap snapshot;
@@ -44,9 +59,10 @@ namespace
                 WCHAR relPath[1024]{};
                 uintmax_t size = 0;
                 long long lastWriteTime = 0;
-                if (swscanf_s(line, L"%1023[^|]|%ju|%lld", relPath, (unsigned)_countof(relPath), &size, &lastWriteTime) == 3)
+                int isDirectory = 0;
+                if (swscanf_s(line, L"%1023[^|]|%d|%ju|%lld", relPath, (unsigned)_countof(relPath), &isDirectory, &size, &lastWriteTime) == 4)
                 {
-                    snapshot[relPath] = { size, lastWriteTime };
+                    snapshot[relPath] = { size, lastWriteTime, isDirectory != 0 };
                 }
             }
             fclose(file);
@@ -63,7 +79,7 @@ namespace
         {
             for (const auto& [relPath, info] : snapshot)
             {
-                fwprintf(file, L"%s|%ju|%lld\n", relPath.c_str(), info.size, info.lastWriteTime);
+                fwprintf(file, L"%s|%d|%ju|%lld\n", relPath.c_str(), info.isDirectory ? 1 : 0, info.size, info.lastWriteTime);
             }
             fclose(file);
             
@@ -93,6 +109,145 @@ namespace
         std::wstringstream ss;
         ss << L"[失败] " << action << L": " << path.wstring() << L"，原因: " << wideMessage;
         return ss.str();
+    }
+
+    std::wstring GetVolumeRootForPath(const std::wstring& path)
+    {
+        if (path.empty())
+        {
+            return L"";
+        }
+
+        WCHAR root[MAX_PATH * 4]{};
+        if (GetVolumePathNameW(path.c_str(), root, ARRAYSIZE(root)))
+        {
+            return root;
+        }
+
+        return L"";
+    }
+
+    bool CapturePathVolumeInfo(const std::wstring& path, std::wstring& volumeGuid, std::wstring& relativePath)
+    {
+        const std::wstring volumeRoot = GetVolumeRootForPath(path);
+        if (volumeRoot.empty())
+        {
+            return false;
+        }
+
+        WCHAR volumeName[MAX_PATH * 4]{};
+        if (!GetVolumeNameForVolumeMountPointW(volumeRoot.c_str(), volumeName, ARRAYSIZE(volumeName)))
+        {
+            return false;
+        }
+
+        volumeGuid = volumeName;
+        relativePath = path;
+        if (relativePath.size() >= volumeRoot.size())
+        {
+            relativePath = relativePath.substr(volumeRoot.size());
+        }
+
+        while (!relativePath.empty() && (relativePath.front() == L'\\' || relativePath.front() == L'/'))
+        {
+            relativePath.erase(relativePath.begin());
+        }
+
+        return !volumeGuid.empty();
+    }
+
+    std::vector<std::wstring> GetMountPointsForVolume(const std::wstring& volumeGuid)
+    {
+        std::vector<std::wstring> mountPoints;
+        if (volumeGuid.empty())
+        {
+            return mountPoints;
+        }
+
+        DWORD requiredLength = 0;
+        if (!GetVolumePathNamesForVolumeNameW(volumeGuid.c_str(), nullptr, 0, &requiredLength) &&
+            GetLastError() != ERROR_MORE_DATA)
+        {
+            return mountPoints;
+        }
+
+        if (requiredLength == 0)
+        {
+            return mountPoints;
+        }
+
+        std::vector<WCHAR> buffer(requiredLength + 1, L'\0');
+        if (!GetVolumePathNamesForVolumeNameW(volumeGuid.c_str(), buffer.data(), (DWORD)buffer.size(), &requiredLength))
+        {
+            return mountPoints;
+        }
+
+        const WCHAR* current = buffer.data();
+        while (*current)
+        {
+            mountPoints.emplace_back(current);
+            current += wcslen(current) + 1;
+        }
+
+        return mountPoints;
+    }
+
+    std::wstring CombineRootAndRelativePath(std::wstring root, const std::wstring& relativePath)
+    {
+        if (root.empty())
+        {
+            return L"";
+        }
+
+        if (!root.empty() && root.back() != L'\\' && root.back() != L'/')
+        {
+            root += L"\\";
+        }
+
+        std::wstring rel = relativePath;
+        while (!rel.empty() && (rel.front() == L'\\' || rel.front() == L'/'))
+        {
+            rel.erase(rel.begin());
+        }
+
+        return root + rel;
+    }
+
+    bool TryResolvePathByVolumeInfo(std::wstring& path, const std::wstring& volumeGuid, const std::wstring& relativePath, const std::wstring& label, SyncLogCallback& log)
+    {
+        std::error_code ec;
+        if (!path.empty() && fs::exists(path, ec))
+        {
+            return true;
+        }
+        ec.clear();
+
+        if (volumeGuid.empty())
+        {
+            WriteLog(log, L"[路径恢复失败] " + label + L"缺少卷标识: " + path);
+            return false;
+        }
+
+        std::vector<std::wstring> candidateRoots = GetMountPointsForVolume(volumeGuid);
+        candidateRoots.push_back(volumeGuid);
+
+        for (const auto& root : candidateRoots)
+        {
+            const std::wstring candidate = CombineRootAndRelativePath(root, relativePath);
+            if (!candidate.empty() && fs::exists(candidate, ec))
+            {
+                if (candidate != path)
+                {
+                    WriteLog(log, L"[路径恢复] " + label + L": " + path + L" -> " + candidate);
+                    path = candidate;
+                }
+                return true;
+            }
+            ec.clear();
+        }
+
+        WriteLog(log, L"[路径恢复失败] " + label + L"未找到可用路径，请插入对应磁盘或重新添加任务: " + path);
+        return false;
     }
 
     bool ShouldCopyFile(const fs::path& sourceFile, const fs::path& targetFile)
@@ -244,57 +399,65 @@ namespace
         }
     }
 
-    void DeleteEmptyDirectories(const fs::path& root, SyncStats& stats, SyncLogCallback& log)
+    void DeleteEmptyParentDirectories(const fs::path& root, fs::path directory, SyncStats& stats, SyncLogCallback& log)
     {
         std::error_code ec;
-        if (!fs::exists(root, ec) || !fs::is_directory(root, ec))
+        if (!fs::exists(root, ec) || !fs::is_directory(root, ec) || directory.empty())
         {
             return;
         }
 
-        std::vector<fs::path> directories;
-        for (const auto& entry : fs::recursive_directory_iterator(root, fs::directory_options::skip_permission_denied, ec))
+        const fs::path canonicalRoot = fs::weakly_canonical(root, ec);
+        if (ec)
         {
+            ec.clear();
+            return;
+        }
+
+        while (!directory.empty())
+        {
+            const fs::path canonicalDirectory = fs::weakly_canonical(directory, ec);
+            if (ec || canonicalDirectory == canonicalRoot)
+            {
+                ec.clear();
+                break;
+            }
+
+            if (!fs::is_empty(directory, ec))
+            {
+                ec.clear();
+                break;
+            }
+
+            fs::remove(directory, ec);
             if (ec)
             {
                 stats.failedFiles++;
-                WriteLog(log, ErrorMessage(L"遍历空目录", root, ec));
+                WriteLog(log, ErrorMessage(L"删除空目录", directory, ec));
                 ec.clear();
-                continue;
+                break;
             }
 
-            if (entry.is_directory(ec))
-            {
-                directories.push_back(entry.path());
-            }
-            else
-            {
-                ec.clear();
-            }
+            stats.deletedFiles++;
+            WriteLog(log, L"[删除空目录] " + directory.wstring());
+            directory = directory.parent_path();
         }
+    }
 
-        for (auto it = directories.rbegin(); it != directories.rend(); ++it)
+    bool IsChildPathOf(const std::wstring& child, const std::wstring& parent)
+    {
+        if (child.size() <= parent.size())
         {
-            if (fs::is_empty(*it, ec))
-            {
-                fs::remove(*it, ec);
-                if (ec)
-                {
-                    stats.failedFiles++;
-                    WriteLog(log, ErrorMessage(L"删除空目录", *it, ec));
-                    ec.clear();
-                }
-                else
-                {
-                    stats.deletedFiles++;
-                    WriteLog(log, L"[删除空目录] " + it->wstring());
-                }
-            }
-            else
-            {
-                ec.clear();
-            }
+            return false;
         }
+
+        if (child.compare(0, parent.size(), parent) != 0)
+        {
+            return false;
+        }
+
+        const wchar_t separator = child[parent.size()];
+        return separator == L'\\' || separator == L'/';
     }
 }
 
@@ -467,6 +630,48 @@ bool IsPathAvailable(const std::wstring& path)
     return fs::exists(fs::path(path), ec);
 }
 
+bool CaptureSyncPairVolumeInfo(SyncPair& pair)
+{
+    bool ok = true;
+    ok = CapturePathVolumeInfo(pair.source, pair.sourceVolumeGuid, pair.sourceRelativePath) && ok;
+    ok = CapturePathVolumeInfo(pair.target, pair.targetVolumeGuid, pair.targetRelativePath) && ok;
+    return ok;
+}
+
+bool TryResolveSyncPairPaths(SyncPair& pair, SyncLogCallback log)
+{
+    SyncLogCallback logCopy = log;
+    if (pair.sourceVolumeGuid.empty() || pair.sourceRelativePath.empty() ||
+        pair.targetVolumeGuid.empty() || pair.targetRelativePath.empty())
+    {
+        CaptureSyncPairVolumeInfo(pair);
+    }
+
+    const bool sourceOk = TryResolvePathByVolumeInfo(pair.source, pair.sourceVolumeGuid, pair.sourceRelativePath, L"源文件夹", logCopy);
+    const bool targetOk = TryResolvePathByVolumeInfo(pair.target, pair.targetVolumeGuid, pair.targetRelativePath, L"目标文件夹", logCopy);
+
+    if (sourceOk && targetOk)
+    {
+        CaptureSyncPairVolumeInfo(pair);
+        return true;
+    }
+
+    return false;
+}
+
+bool ResolveSyncPairPaths(std::vector<SyncPair>& pairs, SyncLogCallback log)
+{
+    bool allOk = true;
+    for (auto& pair : pairs)
+    {
+        if (!TryResolveSyncPairPaths(pair, log))
+        {
+            allOk = false;
+        }
+    }
+    return allOk;
+}
+
 bool DeleteSnapshotForPair(const SyncPair& pair, SyncLogCallback log)
 {
     if (!pair.isBidirectional)
@@ -474,28 +679,47 @@ bool DeleteSnapshotForPair(const SyncPair& pair, SyncLogCallback log)
         return true;
     }
 
-    const std::wstring snapshotPath = GetSnapshotFilePath(pair.source, pair.target);
-    if (snapshotPath.empty())
+    const std::wstring snapshotPath = GetSnapshotFilePath(pair);
+    const std::wstring legacySnapshotPath = GetSnapshotFilePath(pair.source, pair.target);
+    if (snapshotPath.empty() && legacySnapshotPath.empty())
     {
         WriteLog(log, L"[失败] 删除快照文件: 无法获取快照文件路径");
         return false;
     }
 
+    bool ok = true;
     std::error_code ec;
-    if (!fs::exists(snapshotPath, ec))
+    auto removeSnapshot = [&](const std::wstring& path)
     {
-        return true;
+        if (path.empty())
+        {
+            return;
+        }
+
+        ec.clear();
+        if (!fs::exists(path, ec))
+        {
+            return;
+        }
+
+        fs::remove(path, ec);
+        if (ec)
+        {
+            WriteLog(log, ErrorMessage(L"删除快照文件", path, ec));
+            ok = false;
+            return;
+        }
+
+        WriteLog(log, L"[删除快照] " + path);
+    };
+
+    removeSnapshot(snapshotPath);
+    if (legacySnapshotPath != snapshotPath)
+    {
+        removeSnapshot(legacySnapshotPath);
     }
 
-    fs::remove(snapshotPath, ec);
-    if (ec)
-    {
-        WriteLog(log, ErrorMessage(L"删除快照文件", snapshotPath, ec));
-        return false;
-    }
-
-    WriteLog(log, L"[删除快照] " + snapshotPath);
-    return true;
+    return ok;
 }
 
 SyncStats SyncFolderPair(const SyncPair& pair, const SyncOptions& options, SyncLogCallback log, ProgressCallback progress)
@@ -561,8 +785,18 @@ SyncStats SyncFolderPair(const SyncPair& pair, const SyncOptions& options, SyncL
 
     if (pair.isBidirectional)
     {
-        std::wstring snapshotPath = GetSnapshotFilePath(rootA.wstring(), rootB.wstring());
+        std::wstring snapshotPath = GetSnapshotFilePath(pair);
+        const std::wstring legacySnapshotPath = GetSnapshotFilePath(rootA.wstring(), rootB.wstring());
+        std::error_code snapshotEc;
+        if (snapshotPath != legacySnapshotPath &&
+            !fs::exists(snapshotPath, snapshotEc) &&
+            fs::exists(legacySnapshotPath, snapshotEc))
+        {
+            WriteLog(log, L"[快照迁移] 使用旧路径快照并迁移到稳定磁盘标识快照。");
+            snapshotPath = legacySnapshotPath;
+        }
         SnapshotMap lastSnapshot = LoadSnapshot(snapshotPath);
+        const std::wstring saveSnapshotPath = GetSnapshotFilePath(pair);
         SnapshotMap currentSnapshot;
         SnapshotMap currentA;
         SnapshotMap currentB;
@@ -573,13 +807,27 @@ SyncStats SyncFolderPair(const SyncPair& pair, const SyncOptions& options, SyncL
             if (!fs::exists(root, ec) || !fs::is_directory(root, ec)) return;
             for (const auto& entry : fs::recursive_directory_iterator(root, fs::directory_options::skip_permission_denied, ec))
             {
-                if (!ec && entry.is_regular_file(ec))
+                if (!ec && entry.is_directory(ec))
+                {
+                    fs::path relPath = fs::relative(entry.path(), root, ec);
+                    if (!ec)
+                    {
+                        auto ftime = fs::last_write_time(entry.path(), ec);
+                        long long timeVal = 0;
+                        if (!ec)
+                        {
+                            timeVal = std::chrono::duration_cast<std::chrono::seconds>(ftime.time_since_epoch()).count();
+                        }
+                        mapOut[relPath.wstring()] = { 0, timeVal, true };
+                    }
+                }
+                else if (!ec && entry.is_regular_file(ec))
                 {
                     fs::path relPath = fs::relative(entry.path(), root, ec);
                     if (!ec) {
                         auto ftime = fs::last_write_time(entry.path(), ec);
                         long long timeVal = std::chrono::duration_cast<std::chrono::seconds>(ftime.time_since_epoch()).count();
-                        mapOut[relPath.wstring()] = { entry.file_size(ec), timeVal };
+                        mapOut[relPath.wstring()] = { entry.file_size(ec), timeVal, false };
                     }
                 }
                 else ec.clear();
@@ -592,11 +840,131 @@ SyncStats SyncFolderPair(const SyncPair& pair, const SyncOptions& options, SyncL
         std::vector<std::future<void>> futures;
         std::atomic<size_t> processedItems{ 0 };
         size_t totalItems = currentA.size() + currentB.size();
+        std::unordered_set<std::wstring> deletedDirectories;
+
+        auto recordUnchangedDirectoryAncestors = [&](const std::wstring& relPathStr)
+        {
+            fs::path parent = fs::path(relPathStr).parent_path();
+            while (!parent.empty())
+            {
+                const std::wstring parentStr = parent.wstring();
+                auto it = currentA.find(parentStr);
+                if (it != currentA.end() && it->second.isDirectory)
+                {
+                    std::lock_guard<std::mutex> lock(currentSnapshotMutex);
+                    currentSnapshot[parentStr] = it->second;
+                }
+                else
+                {
+                    auto itB = currentB.find(parentStr);
+                    if (itB != currentB.end() && itB->second.isDirectory)
+                    {
+                        std::lock_guard<std::mutex> lock(currentSnapshotMutex);
+                        currentSnapshot[parentStr] = itB->second;
+                    }
+                }
+                parent = parent.parent_path();
+            }
+        };
+
+        auto isUnderDeletedDirectory = [&](const std::wstring& relPathStr)
+        {
+            for (const auto& deletedDirectory : deletedDirectories)
+            {
+                if (IsChildPathOf(relPathStr, deletedDirectory))
+                {
+                    return true;
+                }
+            }
+            return false;
+        };
+
+        auto removeDirectoryTree = [&](const fs::path& path, const std::wstring& relPathStr)
+        {
+            std::error_code ec;
+            if (!fs::exists(path, ec))
+            {
+                ec.clear();
+                deletedDirectories.insert(relPathStr);
+                return;
+            }
+
+            fs::remove_all(path, ec);
+            if (ec)
+            {
+                stats.failedFiles++;
+                WriteLog(log, ErrorMessage(L"删除目录", path, ec));
+                ec.clear();
+            }
+            else
+            {
+                stats.deletedFiles++;
+                deletedDirectories.insert(relPathStr);
+                WriteLog(log, L"[删除目录] " + path.wstring());
+            }
+        };
+
+        auto createDirectoryItem = [&](const fs::path& path, const std::wstring& relPathStr, const FileSnapshot& snapshot)
+        {
+            std::error_code ec;
+            fs::create_directories(path, ec);
+            if (ec)
+            {
+                stats.failedFiles++;
+                WriteLog(log, ErrorMessage(L"创建目录", path, ec));
+                ec.clear();
+                return;
+            }
+
+            std::lock_guard<std::mutex> lock(currentSnapshotMutex);
+            currentSnapshot[relPathStr] = snapshot;
+            WriteLog(log, L"[创建目录] " + path.wstring());
+        };
 
         auto processFile = [&](const std::wstring& relPathStr, bool inA, bool inB, bool inSnap, FileSnapshot snapA, FileSnapshot snapB, FileSnapshot snapS) {
             fs::path relPath(relPathStr);
             fs::path pathA = rootA / relPath;
             fs::path pathB = rootB / relPath;
+
+            const bool isDirectory = (inA && snapA.isDirectory) || (inB && snapB.isDirectory) || (inSnap && snapS.isDirectory);
+
+            if (isDirectory)
+            {
+                if (inA && inB)
+                {
+                    std::lock_guard<std::mutex> lock(currentSnapshotMutex);
+                    currentSnapshot[relPathStr] = snapA;
+                }
+                else if (inA && !inB)
+                {
+                    if (inSnap)
+                    {
+                        removeDirectoryTree(pathA, relPathStr);
+                    }
+                    else
+                    {
+                        createDirectoryItem(pathB, relPathStr, snapA);
+                    }
+                }
+                else if (!inA && inB)
+                {
+                    if (inSnap)
+                    {
+                        removeDirectoryTree(pathB, relPathStr);
+                    }
+                    else
+                    {
+                        createDirectoryItem(pathA, relPathStr, snapB);
+                    }
+                }
+
+                return;
+            }
+
+            if (isUnderDeletedDirectory(relPathStr))
+            {
+                return;
+            }
 
             bool aChanged = false;
             bool bChanged = false;
@@ -639,7 +1007,11 @@ SyncStats SyncFolderPair(const SyncPair& pair, const SyncOptions& options, SyncL
             } else if (inA && !inB) {
                 if (inSnap && !aChanged) {
                     // Deleted in B, no change in A -> Delete in A
-                    if (fs::remove(pathA, ec)) stats.deletedFiles++;
+                    if (fs::remove(pathA, ec))
+                    {
+                        stats.deletedFiles++;
+                        DeleteEmptyParentDirectories(rootA, pathA.parent_path(), stats, log);
+                    }
                     else stats.failedFiles++;
                 } else {
                     // New in A, or modified in A and deleted in B -> Copy to B
@@ -650,7 +1022,11 @@ SyncStats SyncFolderPair(const SyncPair& pair, const SyncOptions& options, SyncL
             } else if (!inA && inB) {
                 if (inSnap && !bChanged) {
                     // Deleted in A, no change in B -> Delete in B
-                    if (fs::remove(pathB, ec)) stats.deletedFiles++;
+                    if (fs::remove(pathB, ec))
+                    {
+                        stats.deletedFiles++;
+                        DeleteEmptyParentDirectories(rootB, pathB.parent_path(), stats, log);
+                    }
                     else stats.failedFiles++;
                 } else {
                     // New in B, or modified in B and deleted in A -> Copy to A
@@ -661,6 +1037,19 @@ SyncStats SyncFolderPair(const SyncPair& pair, const SyncOptions& options, SyncL
             }
         };
 
+        auto processPath = [&](const std::wstring& relPathStr)
+        {
+            const bool inA = currentA.count(relPathStr) > 0;
+            const bool inB = currentB.count(relPathStr) > 0;
+            const bool inSnap = lastSnapshot.count(relPathStr) > 0;
+
+            const FileSnapshot snapA = inA ? currentA[relPathStr] : FileSnapshot{ 0, 0, false };
+            const FileSnapshot snapB = inB ? currentB[relPathStr] : FileSnapshot{ 0, 0, false };
+            const FileSnapshot snapS = inSnap ? lastSnapshot[relPathStr] : FileSnapshot{ 0, 0, false };
+
+            processFile(relPathStr, inA, inB, inSnap, snapA, snapB, snapS);
+        };
+
         // Gather all relative paths
         std::unordered_set<std::wstring> allPaths;
         for (const auto& kv : currentA) allPaths.insert(kv.first);
@@ -669,23 +1058,53 @@ SyncStats SyncFolderPair(const SyncPair& pair, const SyncOptions& options, SyncL
 
         std::vector<std::wstring> pathList(allPaths.begin(), allPaths.end());
         totalItems = pathList.size();
-        const size_t batchSize = (std::max<size_t>)(1, pathList.size() / std::thread::hardware_concurrency());
 
-        for (size_t i = 0; i < pathList.size(); i += batchSize) {
-            auto batchEnd = (std::min)(pathList.size(), i + batchSize);
-            std::vector<std::wstring> batch(pathList.begin() + i, pathList.begin() + batchEnd);
+        std::vector<std::wstring> directoryPaths;
+        std::vector<std::wstring> filePaths;
+        directoryPaths.reserve(pathList.size());
+        filePaths.reserve(pathList.size());
 
-            futures.push_back(std::async(std::launch::async, [batch, &currentA, &currentB, &lastSnapshot, processFile, &progress, &processedItems, totalItems]() {
+        for (const auto& relPathStr : pathList)
+        {
+            const bool isDirectory =
+                (currentA.count(relPathStr) > 0 && currentA[relPathStr].isDirectory) ||
+                (currentB.count(relPathStr) > 0 && currentB[relPathStr].isDirectory) ||
+                (lastSnapshot.count(relPathStr) > 0 && lastSnapshot[relPathStr].isDirectory);
+
+            if (isDirectory)
+            {
+                directoryPaths.push_back(relPathStr);
+            }
+            else
+            {
+                filePaths.push_back(relPathStr);
+            }
+        }
+
+        std::sort(directoryPaths.begin(), directoryPaths.end(), [](const std::wstring& a, const std::wstring& b)
+            {
+                return a.size() > b.size();
+            });
+
+        for (const auto& relPathStr : directoryPaths)
+        {
+            processPath(relPathStr);
+            processedItems++;
+            if (progress && totalItems > 0)
+            {
+                progress((float)processedItems / totalItems);
+            }
+        }
+
+        const size_t batchSize = (std::max<size_t>)(1, filePaths.size() / std::thread::hardware_concurrency());
+
+        for (size_t i = 0; i < filePaths.size(); i += batchSize) {
+            auto batchEnd = (std::min)(filePaths.size(), i + batchSize);
+            std::vector<std::wstring> batch(filePaths.begin() + i, filePaths.begin() + batchEnd);
+
+            futures.push_back(std::async(std::launch::async, [batch, processPath, &progress, &processedItems, totalItems]() {
                 for (const auto& relPathStr : batch) {
-                    bool inA = currentA.count(relPathStr) > 0;
-                    bool inB = currentB.count(relPathStr) > 0;
-                    bool inSnap = lastSnapshot.count(relPathStr) > 0;
-
-                    FileSnapshot snapA = inA ? currentA[relPathStr] : FileSnapshot{0, 0};
-                    FileSnapshot snapB = inB ? currentB[relPathStr] : FileSnapshot{0, 0};
-                    FileSnapshot snapS = inSnap ? lastSnapshot[relPathStr] : FileSnapshot{0, 0};
-
-                    processFile(relPathStr, inA, inB, inSnap, snapA, snapB, snapS);
+                    processPath(relPathStr);
 
                     processedItems++;
                     if (progress && totalItems > 0)
@@ -700,10 +1119,7 @@ SyncStats SyncFolderPair(const SyncPair& pair, const SyncOptions& options, SyncL
             f.wait();
         }
 
-        DeleteEmptyDirectories(rootA, stats, log);
-        DeleteEmptyDirectories(rootB, stats, log);
-
-        SaveSnapshot(snapshotPath, currentSnapshot);
+        SaveSnapshot(saveSnapshotPath.empty() ? snapshotPath : saveSnapshotPath, currentSnapshot);
     }
     else
     {
@@ -711,7 +1127,6 @@ SyncStats SyncFolderPair(const SyncPair& pair, const SyncOptions& options, SyncL
         if (options.deleteExtraFiles)
         {
             DeleteExtraTargetFiles(rootA, rootB, stats, log);
-            DeleteEmptyDirectories(rootB, stats, log);
         }
     }
 
