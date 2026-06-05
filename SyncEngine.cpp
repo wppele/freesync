@@ -8,6 +8,8 @@
 #include <thread>
 #include <atomic>
 #include <mutex>
+#include <condition_variable>
+#include <queue>
 #include <windows.h>
 
 #include <future>
@@ -839,32 +841,118 @@ SyncStats SyncFolderPair(const SyncPair& pair, const SyncOptions& options, SyncL
         auto scanDir = [](const fs::path& root, SnapshotMap& mapOut) {
             std::error_code ec;
             if (!fs::exists(root, ec) || !fs::is_directory(root, ec)) return;
-            for (const auto& entry : fs::recursive_directory_iterator(root, fs::directory_options::skip_permission_denied, ec))
-            {
-                if (!ec && entry.is_directory(ec))
-                {
-                    fs::path relPath = fs::relative(entry.path(), root, ec);
-                    if (!ec)
-                    {
-                        auto ftime = fs::last_write_time(entry.path(), ec);
-                        long long timeVal = 0;
-                        if (!ec)
+
+            // 目录处理任务包
+            struct DirTask {
+                fs::path absPath;
+                fs::path relPath;
+            };
+
+            std::mutex mapMutex;
+            std::mutex queueMutex;
+            std::condition_variable cv;
+            std::queue<DirTask> dirsToProcess;
+            int activeTasks = 0; // 当前正在执行的任务数
+
+            // 推入根目录作为初始任务，根目录的相对路径为空
+            dirsToProcess.push({root, fs::path()});
+
+            unsigned int numThreads = std::thread::hardware_concurrency();
+            if (numThreads == 0) numThreads = 4; // 兜底策略
+
+            std::vector<std::thread> workers;
+            for (unsigned int i = 0; i < numThreads; ++i) {
+                workers.emplace_back([&]() {
+                    while (true) {
+                        DirTask currentTask;
                         {
-                            timeVal = std::chrono::duration_cast<std::chrono::seconds>(ftime.time_since_epoch()).count();
+                            std::unique_lock<std::mutex> lock(queueMutex);
+                            // 等待队列有任务，或者所有任务都已处理完成
+                            cv.wait(lock, [&]() { return !dirsToProcess.empty() || activeTasks == 0; });
+
+                            if (dirsToProcess.empty() && activeTasks == 0) {
+                                return; // 没有任务且所有线程均空闲，退出线程
+                            }
+
+                            currentTask = std::move(dirsToProcess.front());
+                            dirsToProcess.pop();
+                            activeTasks++; // 增加活跃任务计数
                         }
-                        mapOut[relPath.wstring()] = { 0, timeVal, true };
+
+                        try {
+                            std::vector<DirTask> subDirs;
+                            SnapshotMap localMap; // 局部缓存，减少加锁频率
+
+                            std::error_code iterEc;
+                            auto it = fs::directory_iterator(currentTask.absPath, fs::directory_options::skip_permission_denied, iterEc);
+                            auto end = fs::directory_iterator();
+
+                            while (!iterEc && it != end) {
+                                const auto& entry = *it;
+                                std::error_code localEc;
+
+                                // 优化：避免调用耗时的 fs::relative，通过逐层拼接获取相对路径
+                                fs::path childRelPath = currentTask.relPath.empty() 
+                                    ? entry.path().filename() 
+                                    : currentTask.relPath / entry.path().filename();
+
+                                if (entry.is_directory(localEc)) {
+                                    if (!localEc) {
+                                        auto ftime = fs::last_write_time(entry.path(), localEc);
+                                        long long timeVal = 0;
+                                        if (!localEc) {
+                                            timeVal = std::chrono::duration_cast<std::chrono::seconds>(ftime.time_since_epoch()).count();
+                                        }
+                                        localMap[childRelPath.wstring()] = { 0, timeVal, true };
+                                        subDirs.push_back({entry.path(), std::move(childRelPath)});
+                                    }
+                                }
+                                else if (!localEc && entry.is_regular_file(localEc)) {
+                                    if (!localEc) {
+                                        auto ftime = fs::last_write_time(entry.path(), localEc);
+                                        long long timeVal = std::chrono::duration_cast<std::chrono::seconds>(ftime.time_since_epoch()).count();
+                                        localMap[childRelPath.wstring()] = { entry.file_size(localEc), timeVal, false };
+                                    }
+                                }
+                                else {
+                                    localEc.clear();
+                                }
+
+                                it.increment(iterEc);
+                            }
+
+                            // 批量写入全局结果，减少锁竞争
+                            if (!localMap.empty()) {
+                                std::lock_guard<std::mutex> lock(mapMutex);
+                                for (auto& kv : localMap) {
+                                    mapOut[kv.first] = kv.second;
+                                }
+                            }
+
+                            // 将子目录推入任务队列并减少活跃任务计数
+                            {
+                                std::lock_guard<std::mutex> lock(queueMutex);
+                                for (auto& dir : subDirs) {
+                                    dirsToProcess.push(std::move(dir));
+                                }
+                                activeTasks--;
+                            }
+                            cv.notify_all(); // 唤醒可能在等待队列的线程
+                        } catch (...) {
+                            // 异常安全保护
+                            std::lock_guard<std::mutex> lock(queueMutex);
+                            activeTasks--;
+                            cv.notify_all();
+                        }
                     }
+                });
+            }
+
+            // 等待所有工作线程完成
+            for (auto& t : workers) {
+                if (t.joinable()) {
+                    t.join();
                 }
-                else if (!ec && entry.is_regular_file(ec))
-                {
-                    fs::path relPath = fs::relative(entry.path(), root, ec);
-                    if (!ec) {
-                        auto ftime = fs::last_write_time(entry.path(), ec);
-                        long long timeVal = std::chrono::duration_cast<std::chrono::seconds>(ftime.time_since_epoch()).count();
-                        mapOut[relPath.wstring()] = { entry.file_size(ec), timeVal, false };
-                    }
-                }
-                else ec.clear();
             }
         };
 

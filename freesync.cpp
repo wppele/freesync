@@ -978,6 +978,21 @@ void LoadSettings(HWND hWnd)
 void SaveSettings()
 {
     const std::wstring configPath = GetConfigPath();
+
+    // 如果文件不存在，则创建一个带有 UTF-16 LE BOM 的空文件
+    // 这样能确保 WritePrivateProfileStringW 总是以 Unicode (UTF-16) 编码写入，防止中文路径变乱码
+    if (GetFileAttributesW(configPath.c_str()) == INVALID_FILE_ATTRIBUTES)
+    {
+        HANDLE hFile = CreateFileW(configPath.c_str(), GENERIC_WRITE, 0, NULL, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, NULL);
+        if (hFile != INVALID_HANDLE_VALUE)
+        {
+            const unsigned char bom[] = { 0xFF, 0xFE };
+            DWORD bytesWritten = 0;
+            WriteFile(hFile, bom, sizeof(bom), &bytesWritten, NULL);
+            CloseHandle(hFile);
+        }
+    }
+
     WritePrivateProfileStringW(L"Settings", L"DeleteExtraFiles",
         SendMessageW(hDeleteExtra, BM_GETCHECK, 0, 0) == BST_CHECKED ? L"1" : L"0", configPath.c_str());
     WritePrivateProfileStringW(L"Settings", L"AutoMonitor",
