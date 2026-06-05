@@ -5,6 +5,7 @@
 ![C++](https://img.shields.io/badge/C++-17-blue.svg)
 
 FreeSync 是一款轻量、快速的 Windows 文件夹同步工具，使用现代 C++17 开发。主要用于在两个文件夹之间同步文件、文件夹和删除操作，确保你的重要数据随时都有备份。
+<img width="886" height="643" alt="image" src="https://github.com/user-attachments/assets/97f85931-6dad-4cbf-b2e1-285ea735cfce" />
 
 ## ✨ 主要特性
 
