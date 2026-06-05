@@ -20,3 +20,5 @@ obj/
 *.res
 *.exe
 *.recipe
+
+.vs/
