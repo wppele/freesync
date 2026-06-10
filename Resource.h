@@ -29,6 +29,8 @@
 #define IDC_ADD_PAIR                    1004
 #define IDC_REMOVE_PAIR                 1005
 #define IDC_RUN_AT_STARTUP              1006
+#define IDC_EDIT_PAIR                   1007
+#define IDC_SYNC_SELECTED               1008
 
 #ifndef IDC_STATIC
 #define IDC_STATIC                      -1

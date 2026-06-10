@@ -469,6 +469,13 @@ namespace
     std::thread g_monitorThread;
     HANDLE g_stopEvent = nullptr;
 
+    struct MonitorHandleInfo
+    {
+        HANDLE handle = nullptr;
+        int pairIndex = -1;
+        bool isTarget = false;
+    };
+
     void MonitorWorker(std::vector<SyncPair> pairs, SyncLogCallback log, ProgressCallback progress)
     {
         // For accurate file monitoring, we should use ReadDirectoryChangesW.
@@ -478,8 +485,10 @@ namespace
         // 
         // As an optimization we will apply a better debouncing strategy.
         std::vector<HANDLE> handles;
-        for (const auto& pair : pairs)
+        std::vector<MonitorHandleInfo> handleInfos;
+        for (int pairIndex = 0; pairIndex < (int)pairs.size(); ++pairIndex)
         {
+            const auto& pair = pairs[pairIndex];
             if (!pair.autoMonitor) continue; // Skip pairs that don't have auto monitor enabled
 
             // 监控源文件夹
@@ -488,6 +497,7 @@ namespace
             if (h != INVALID_HANDLE_VALUE && h != nullptr)
             {
                 handles.push_back(h);
+                handleInfos.push_back({ h, pairIndex, false });
             }
 
             // 如果是双向同步，同时监控目标文件夹
@@ -498,6 +508,7 @@ namespace
                 if (hTarget != INVALID_HANDLE_VALUE && hTarget != nullptr)
                 {
                     handles.push_back(hTarget);
+                    handleInfos.push_back({ hTarget, pairIndex, true });
                 }
             }
         }
@@ -514,27 +525,11 @@ namespace
             if (waitResult >= WAIT_OBJECT_0 && waitResult < WAIT_OBJECT_0 + handles.size() - 1)
             {
                 int triggeredIndex = waitResult - WAIT_OBJECT_0;
-                
-                // 找出是哪个 pair 被触发了，并且是哪个路径触发的
-                int pairIndex = -1;
-                bool isTargetTriggered = false;
-                int currentHandleCount = 0;
-                for (size_t i = 0; i < pairs.size(); ++i)
-                {
-                    int handleCount = pairs[i].isBidirectional ? 2 : 1;
-                    if (triggeredIndex < currentHandleCount + handleCount)
-                    {
-                        pairIndex = (int)i;
-                        if (pairs[i].isBidirectional && (triggeredIndex == currentHandleCount + 1))
-                        {
-                            isTargetTriggered = true;
-                        }
-                        break;
-                    }
-                    currentHandleCount += handleCount;
-                }
-                
-                if (pairIndex == -1) continue;
+                if (triggeredIndex < 0 || triggeredIndex >= (int)handleInfos.size()) continue;
+
+                const MonitorHandleInfo& triggeredInfo = handleInfos[triggeredIndex];
+                const int pairIndex = triggeredInfo.pairIndex;
+                const bool isTargetTriggered = triggeredInfo.isTarget;
 
                 // 消耗掉当前触发的通知，准备开始防抖等待
                 FindNextChangeNotification(handles[triggeredIndex]);
@@ -577,16 +572,16 @@ namespace
                         SyncFolderPair(pairs[pairIndex], log, progress);
                         
                         // 同步完成后，清理该任务关联的所有句柄在同步期间产生的积压信号（防止反馈环路）
-                        int pairStartIdx = 0;
-                        for (int i = 0; i < pairIndex; ++i) 
-                            pairStartIdx += (pairs[i].isBidirectional ? 2 : 1);
-                        
-                        int numHandles = pairs[pairIndex].isBidirectional ? 2 : 1;
-                        for (int i = 0; i < numHandles; ++i)
+                        for (size_t i = 0; i < handleInfos.size(); ++i)
                         {
-                            while (WaitForSingleObject(handles[pairStartIdx + i], 0) == WAIT_OBJECT_0)
+                            if (handleInfos[i].pairIndex != pairIndex)
                             {
-                                FindNextChangeNotification(handles[pairStartIdx + i]);
+                                continue;
+                            }
+
+                            while (WaitForSingleObject(handleInfos[i].handle, 0) == WAIT_OBJECT_0)
+                            {
+                                FindNextChangeNotification(handleInfos[i].handle);
                             }
                         }
 

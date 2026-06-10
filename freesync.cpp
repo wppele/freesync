@@ -16,6 +16,7 @@
 #include <sstream>
 #include <chrono>
 #pragma comment(lib, "comctl32.lib")
+#pragma comment(linker, "\"/manifestdependency:type='win32' name='Microsoft.Windows.Common-Controls' version='6.0.0.0' processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
 
 #define MAX_LOADSTRING 100
 
@@ -38,6 +39,7 @@ HWND hPairList;
 HWND hAutoMonitor;
 HWND hLogEdit;
 HWND hProgressBar;
+HWND hStatusLabel;
 HFONT hMainFont;
 NOTIFYICONDATAW nid = {};
 std::vector<SyncPair> gSyncPairs;
@@ -61,6 +63,10 @@ void                RemoveTrayIcon();
 void                ApplyMainFont(HWND hWnd);
 void                RefreshPairList();
 void                StartSinglePairSync(HWND hWnd, int index);
+void                EditSelectedSyncPair(HWND hWnd);
+void                ShowTaskContextMenu(HWND hWnd, int x, int y);
+void                SetStatusText(const std::wstring& text);
+void                SetSyncControlsEnabled(HWND hWnd, bool enabled);
 std::wstring        GetConfigPath();
 bool                PrepareSyncPairsForUse(HWND hWnd, bool showMessageOnFailure);
 bool                CheckAndRecoverSinglePair(HWND hWnd, int index, bool showMessageOnFailure);
@@ -75,6 +81,11 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
                      _In_ int       nCmdShow)
 {
     UNREFERENCED_PARAMETER(hPrevInstance);
+
+    INITCOMMONCONTROLSEX icc{};
+    icc.dwSize = sizeof(icc);
+    icc.dwICC = ICC_LISTVIEW_CLASSES | ICC_PROGRESS_CLASS | ICC_STANDARD_CLASSES;
+    InitCommonControlsEx(&icc);
 
     // TODO: Place code here.
     bool startMinimized = false;
@@ -154,7 +165,7 @@ BOOL InitInstance(HINSTANCE hInstance, int nCmdShow)
    hInst = hInstance; // Store instance handle in our global variable
 
    HWND hWnd = CreateWindowW(szWindowClass, szTitle, WS_OVERLAPPEDWINDOW,
-    CW_USEDEFAULT, 0, 900, 650, nullptr, nullptr, hInstance, nullptr);
+    CW_USEDEFAULT, 0, 960, 700, nullptr, nullptr, hInstance, nullptr);
 
    if (!hWnd)
    {
@@ -203,9 +214,21 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
             case IDC_ADD_PAIR:
                 DialogBoxParam(hInst, MAKEINTRESOURCE(IDD_ADD_PAIR_DIALOG), hWnd, AddPairDlgProc, -1); // -1 means add new
                 break;
+            case IDC_EDIT_PAIR:
+                EditSelectedSyncPair(hWnd);
+                break;
             case IDC_REMOVE_PAIR:
                 RemoveSelectedSyncPair(hWnd);
                 break;
+            case IDC_SYNC_SELECTED:
+            {
+                const int index = ListView_GetNextItem(hPairList, -1, LVNI_SELECTED);
+                if (index >= 0)
+                {
+                    StartSinglePairSync(hWnd, index);
+                }
+                break;
+            }
             case IDC_AUTO_MONITOR:
                 ToggleMonitoring(hWnd);
                 break;
@@ -231,18 +254,28 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
         LPNMHDR pnmh = (LPNMHDR)lParam;
         if (pnmh->idFrom == IDC_SYNC_LIST && pnmh->code == NM_DBLCLK)
         {
-            // 如果实时同步已开启，则禁止编辑任务（或者可以允许编辑但需要重启监控，这里简单起见禁止）
-            if (SendMessageW(hAutoMonitor, BM_GETCHECK, 0, 0) == BST_CHECKED)
+            EditSelectedSyncPair(hWnd);
+            return 0;
+        }
+        if (pnmh->idFrom == IDC_SYNC_LIST && pnmh->code == NM_RCLICK)
+        {
+            POINT pt;
+            GetCursorPos(&pt);
+            ShowTaskContextMenu(hWnd, pt.x, pt.y);
+            return 0;
+        }
+        if (pnmh->idFrom == IDC_SYNC_LIST && pnmh->code == LVN_KEYDOWN)
+        {
+            NMLVKEYDOWN* key = (NMLVKEYDOWN*)lParam;
+            if (key->wVKey == VK_DELETE)
             {
-                MessageBoxW(hWnd, L"实时同步状态下无法编辑任务，请先关闭实时同步", L"提示", MB_OK | MB_ICONINFORMATION);
+                RemoveSelectedSyncPair(hWnd);
                 return 0;
             }
-
-            LPNMLISTVIEW pnmv = (LPNMLISTVIEW)lParam;
-            if (pnmv->iItem != -1)
+            if (key->wVKey == VK_RETURN)
             {
-                // 打开编辑窗口
-                DialogBoxParam(hInst, MAKEINTRESOURCE(IDD_ADD_PAIR_DIALOG), hWnd, AddPairDlgProc, (LPARAM)pnmv->iItem);
+                EditSelectedSyncPair(hWnd);
+                return 0;
             }
         }
         break;
@@ -264,12 +297,17 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
     }
     case WM_SYNC_COMPLETE:
     {
-        EnableWindow(GetDlgItem(hWnd, IDC_START_SYNC), TRUE);
+        const bool monitoring = SendMessageW(hAutoMonitor, BM_GETCHECK, 0, 0) == BST_CHECKED;
+        EnableWindow(hAutoMonitor, TRUE);
+        SetSyncControlsEnabled(hWnd, !monitoring);
+        SendMessageW(hProgressBar, PBM_SETPOS, 100, 0);
+        SetStatusText(L"同步完成");
         return 0;
     }
     case WM_UPDATE_PROGRESS:
     {
         SendMessageW(hProgressBar, PBM_SETPOS, (WPARAM)wParam, 0);
+        SetStatusText(L"正在同步... " + std::to_wstring((int)wParam) + L"%");
         return 0;
     }
     case WM_CLOSE:
@@ -338,55 +376,70 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 
 void CreateMainControls(HWND hWnd)
 {
-    CreateWindowW(L"STATIC", L"同步任务:", WS_CHILD | WS_VISIBLE,
-        16, 16, 80, 24, hWnd, nullptr, hInst, nullptr);
-    
-    // "+" 按钮
-    CreateWindowW(L"BUTTON", L"➕", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-        100, 14, 30, 24, hWnd, (HMENU)IDC_ADD_PAIR, hInst, nullptr);
-    
-    // "-" 按钮
-    CreateWindowW(L"BUTTON", L"➖", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-        136, 14, 30, 24, hWnd, (HMENU)IDC_REMOVE_PAIR, hInst, nullptr);
+    CreateWindowW(L"STATIC", L"同步任务", WS_CHILD | WS_VISIBLE,
+        20, 18, 90, 24, hWnd, nullptr, hInst, nullptr);
 
-    hPairList = CreateWindowW(WC_LISTVIEWW, L"", WS_CHILD | WS_VISIBLE | WS_BORDER | LVS_REPORT | LVS_SINGLESEL,
-        16, 46, 846, 180, hWnd, (HMENU)IDC_SYNC_LIST, hInst, nullptr);
-    SendMessageW(hPairList, LVM_SETEXTENDEDLISTVIEWSTYLE, 0, LVS_EX_FULLROWSELECT | LVS_EX_GRIDLINES);
+    CreateWindowW(L"BUTTON", L"添加任务", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+        112, 14, 92, 30, hWnd, (HMENU)IDC_ADD_PAIR, hInst, nullptr);
+
+    CreateWindowW(L"BUTTON", L"编辑", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+        212, 14, 72, 30, hWnd, (HMENU)IDC_EDIT_PAIR, hInst, nullptr);
+
+    CreateWindowW(L"BUTTON", L"删除", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+        292, 14, 72, 30, hWnd, (HMENU)IDC_REMOVE_PAIR, hInst, nullptr);
+
+    hPairList = CreateWindowW(WC_LISTVIEWW, L"", WS_CHILD | WS_VISIBLE | WS_BORDER | LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS,
+        20, 52, 900, 220, hWnd, (HMENU)IDC_SYNC_LIST, hInst, nullptr);
+    SendMessageW(hPairList, LVM_SETEXTENDEDLISTVIEWSTYLE, 0, LVS_EX_FULLROWSELECT | LVS_EX_GRIDLINES | LVS_EX_DOUBLEBUFFER | LVS_EX_INFOTIP);
 
     LVCOLUMNW lvc = { 0 };
     lvc.mask = LVCF_TEXT | LVCF_WIDTH | LVCF_SUBITEM;
-    lvc.pszText = (LPWSTR)L"同步任务";
-    lvc.cx = 400;
+    lvc.pszText = (LPWSTR)L"任务与路径";
+    lvc.cx = 470;
     ListView_InsertColumn(hPairList, 0, &lvc);
 
-    lvc.pszText = (LPWSTR)L"设置";
-    lvc.cx = 250;
+    lvc.pszText = (LPWSTR)L"模式";
+    lvc.cx = 160;
     ListView_InsertColumn(hPairList, 1, &lvc);
 
-    lvc.pszText = (LPWSTR)L"操作";
-    lvc.cx = 150;
+    lvc.pszText = (LPWSTR)L"删除策略";
+    lvc.cx = 120;
     ListView_InsertColumn(hPairList, 2, &lvc);
 
+    lvc.pszText = (LPWSTR)L"实时同步";
+    lvc.cx = 110;
+    ListView_InsertColumn(hPairList, 3, &lvc);
+
+    lvc.pszText = (LPWSTR)L"操作提示";
+    lvc.cx = 160;
+    ListView_InsertColumn(hPairList, 4, &lvc);
+
     HWND hRunAtStartup = CreateWindowW(L"BUTTON", L"开机自动运行", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
-        16, 236, 120, 24, hWnd, (HMENU)IDC_RUN_AT_STARTUP, hInst, nullptr);
+        20, 286, 140, 24, hWnd, (HMENU)IDC_RUN_AT_STARTUP, hInst, nullptr);
     if (IsAutoStartEnabled())
     {
         SendMessageW(hRunAtStartup, BM_SETCHECK, BST_CHECKED, 0);
     }
 
-    hAutoMonitor = CreateWindowW(L"BUTTON", L"开启所有实时同步", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
-        156, 236, 150, 24, hWnd, (HMENU)IDC_AUTO_MONITOR, hInst, nullptr);
-    CreateWindowW(L"BUTTON", L"手动同步", WS_CHILD | WS_VISIBLE,
-        326, 233, 110, 30, hWnd, (HMENU)IDC_START_SYNC, hInst, nullptr);
+    hAutoMonitor = CreateWindowW(L"BUTTON", L"启动实时同步监控", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+        174, 286, 170, 24, hWnd, (HMENU)IDC_AUTO_MONITOR, hInst, nullptr);
+    CreateWindowW(L"BUTTON", L"同步选中", WS_CHILD | WS_VISIBLE,
+        360, 282, 100, 32, hWnd, (HMENU)IDC_SYNC_SELECTED, hInst, nullptr);
+    CreateWindowW(L"BUTTON", L"同步全部", WS_CHILD | WS_VISIBLE,
+        468, 282, 100, 32, hWnd, (HMENU)IDC_START_SYNC, hInst, nullptr);
 
-    CreateWindowW(L"STATIC", L"日志:", WS_CHILD | WS_VISIBLE,
-        16, 276, 80, 24, hWnd, nullptr, hInst, nullptr);
+    CreateWindowW(L"STATIC", L"运行日志", WS_CHILD | WS_VISIBLE,
+        20, 328, 80, 24, hWnd, nullptr, hInst, nullptr);
     hLogEdit = CreateWindowW(L"EDIT", L"", WS_CHILD | WS_VISIBLE | WS_BORDER | WS_VSCROLL | ES_MULTILINE | ES_AUTOVSCROLL | ES_READONLY,
-        16, 300, 846, 280, hWnd, (HMENU)IDC_LOG_EDIT, hInst, nullptr);
+        20, 354, 900, 260, hWnd, (HMENU)IDC_LOG_EDIT, hInst, nullptr);
+
+    hStatusLabel = CreateWindowW(L"STATIC", L"就绪", WS_CHILD | WS_VISIBLE | SS_LEFT,
+        20, 628, 300, 22, hWnd, nullptr, hInst, nullptr);
 
     hProgressBar = CreateWindowW(PROGRESS_CLASS, L"", WS_CHILD | WS_VISIBLE | WS_BORDER,
-        16, 590, 846, 24, hWnd, (HMENU)IDC_PROGRESS_BAR, hInst, nullptr);
+        20, 652, 900, 18, hWnd, (HMENU)IDC_PROGRESS_BAR, hInst, nullptr);
     SendMessageW(hProgressBar, PBM_SETRANGE, 0, MAKELPARAM(0, 100));
+    SendMessageW(hProgressBar, PBM_SETSTEP, 1, 0);
 
     ApplyMainFont(hWnd);
     LoadSettings(hWnd);
@@ -394,15 +447,45 @@ void CreateMainControls(HWND hWnd)
 
 void ResizeMainControls(HWND hWnd)
 {
+    if (!hPairList || !hLogEdit || !hProgressBar)
+    {
+        return;
+    }
+
     RECT rc;
     GetClientRect(hWnd, &rc);
     const int width = rc.right - rc.left;
     const int height = rc.bottom - rc.top;
-    const int margin = 16;
+    const int margin = 20;
+    const int contentWidth = max(320, width - margin * 2);
+    const int listHeight = max(160, min(260, (height - 190) / 2));
+    const int optionsTop = 60 + listHeight + 14;
+    const int logTitleTop = optionsTop + 46;
+    const int logTop = logTitleTop + 26;
+    const int statusTop = height - 48;
+    const int progressTop = height - 24;
+    const int logHeight = max(90, statusTop - logTop - 8);
 
-    MoveWindow(hPairList, margin, 46, width - margin * 2, 180, TRUE);
-    MoveWindow(hLogEdit, margin, 300, width - margin * 2, max(80, height - 350), TRUE);
-    MoveWindow(hProgressBar, margin, height - 34, width - margin * 2, 24, TRUE);
+    MoveWindow(hPairList, margin, 52, contentWidth, listHeight, TRUE);
+    MoveWindow(GetDlgItem(hWnd, IDC_RUN_AT_STARTUP), margin, optionsTop, 140, 24, TRUE);
+    MoveWindow(hAutoMonitor, margin + 154, optionsTop, 170, 24, TRUE);
+    MoveWindow(GetDlgItem(hWnd, IDC_SYNC_SELECTED), margin + 340, optionsTop - 4, 100, 32, TRUE);
+    MoveWindow(GetDlgItem(hWnd, IDC_START_SYNC), margin + 448, optionsTop - 4, 100, 32, TRUE);
+    MoveWindow(hLogEdit, margin, logTop, contentWidth, logHeight, TRUE);
+    MoveWindow(hStatusLabel, margin, statusTop, contentWidth, 22, TRUE);
+    MoveWindow(hProgressBar, margin, progressTop, contentWidth, 18, TRUE);
+
+    const int actionWidth = 150;
+    const int monitorWidth = 110;
+    const int deleteWidth = 120;
+    const int modeWidth = 150;
+    const int pathWidth = max(220, contentWidth - actionWidth - monitorWidth - deleteWidth - modeWidth - 8);
+
+    ListView_SetColumnWidth(hPairList, 0, pathWidth);
+    ListView_SetColumnWidth(hPairList, 1, modeWidth);
+    ListView_SetColumnWidth(hPairList, 2, deleteWidth);
+    ListView_SetColumnWidth(hPairList, 3, monitorWidth);
+    ListView_SetColumnWidth(hPairList, 4, actionWidth);
 }
 
 std::wstring GetWindowTextString(HWND hWnd)
@@ -441,6 +524,72 @@ void AppendLog(HWND hWnd, const std::wstring& text)
 
     SendMessageW(hLogEdit, EM_SETSEL, currentLength, currentLength);
     SendMessageW(hLogEdit, EM_REPLACESEL, FALSE, (LPARAM)line.c_str());
+}
+
+void SetStatusText(const std::wstring& text)
+{
+    if (hStatusLabel)
+    {
+        SetWindowTextW(hStatusLabel, text.c_str());
+    }
+}
+
+void SetSyncControlsEnabled(HWND hWnd, bool enabled)
+{
+    EnableWindow(GetDlgItem(hWnd, IDC_ADD_PAIR), enabled);
+    EnableWindow(GetDlgItem(hWnd, IDC_EDIT_PAIR), enabled);
+    EnableWindow(GetDlgItem(hWnd, IDC_REMOVE_PAIR), enabled);
+    EnableWindow(GetDlgItem(hWnd, IDC_SYNC_SELECTED), enabled);
+    EnableWindow(GetDlgItem(hWnd, IDC_START_SYNC), enabled);
+}
+
+void EditSelectedSyncPair(HWND hWnd)
+{
+    if (SendMessageW(hAutoMonitor, BM_GETCHECK, 0, 0) == BST_CHECKED)
+    {
+        MessageBoxW(hWnd, L"实时同步状态下无法编辑任务，请先关闭实时同步。", L"提示", MB_OK | MB_ICONINFORMATION);
+        return;
+    }
+
+    const int index = ListView_GetNextItem(hPairList, -1, LVNI_SELECTED);
+    if (index == -1)
+    {
+        MessageBoxW(hWnd, L"请先在任务列表中选择一个任务。", L"提示", MB_OK | MB_ICONINFORMATION);
+        return;
+    }
+
+    DialogBoxParam(hInst, MAKEINTRESOURCE(IDD_ADD_PAIR_DIALOG), hWnd, AddPairDlgProc, (LPARAM)index);
+}
+
+void ShowTaskContextMenu(HWND hWnd, int x, int y)
+{
+    const int index = ListView_GetNextItem(hPairList, -1, LVNI_SELECTED);
+    if (index == -1)
+    {
+        return;
+    }
+
+    HMENU hMenu = CreatePopupMenu();
+    AppendMenuW(hMenu, MF_STRING, IDC_SYNC_SELECTED, L"同步此任务");
+    AppendMenuW(hMenu, MF_STRING, IDC_EDIT_PAIR, L"编辑任务");
+    AppendMenuW(hMenu, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(hMenu, MF_STRING, IDC_REMOVE_PAIR, L"删除任务");
+
+    if (SendMessageW(hAutoMonitor, BM_GETCHECK, 0, 0) == BST_CHECKED)
+    {
+        EnableMenuItem(hMenu, IDC_SYNC_SELECTED, MF_BYCOMMAND | MF_GRAYED);
+        EnableMenuItem(hMenu, IDC_EDIT_PAIR, MF_BYCOMMAND | MF_GRAYED);
+        EnableMenuItem(hMenu, IDC_REMOVE_PAIR, MF_BYCOMMAND | MF_GRAYED);
+    }
+
+    SetForegroundWindow(hWnd);
+    const int cmd = TrackPopupMenu(hMenu, TPM_RETURNCMD | TPM_NONOTIFY, x, y, 0, hWnd, nullptr);
+    DestroyMenu(hMenu);
+
+    if (cmd != 0)
+    {
+        SendMessageW(hWnd, WM_COMMAND, MAKEWPARAM(cmd, 0), 0);
+    }
 }
 
 INT_PTR CALLBACK AddPairDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM lParam)
@@ -664,8 +813,10 @@ void StartSync(HWND hWnd)
     // 检查并尝试恢复路径，即使有失败也继续尝试同步其他正常的任务
     PrepareSyncPairsForUse(hWnd, true);
 
-    EnableWindow(GetDlgItem(hWnd, IDC_START_SYNC), FALSE);
+    SetSyncControlsEnabled(hWnd, false);
+    EnableWindow(hAutoMonitor, FALSE);
     SendMessageW(hProgressBar, PBM_SETPOS, 0, 0);
+    SetStatusText(L"正在同步全部任务...");
     AppendLog(hWnd, L"[系统] 同步开始...");
 
     std::thread([hWnd]() {
@@ -694,8 +845,10 @@ void StartSinglePairSync(HWND hWnd, int index)
         return;
     }
 
-    EnableWindow(GetDlgItem(hWnd, IDC_START_SYNC), FALSE);
+    SetSyncControlsEnabled(hWnd, false);
+    EnableWindow(hAutoMonitor, FALSE);
     SendMessageW(hProgressBar, PBM_SETPOS, 0, 0);
+    SetStatusText(L"正在同步选中任务...");
     AppendLog(hWnd, L"[系统] 开始同步单项任务...");
 
     SyncPair pair = gSyncPairs[index];
@@ -733,9 +886,7 @@ void ToggleMonitoring(HWND hWnd)
         // 尝试恢复路径，即使有失败也允许开启监控（监控线程内部会重试）
         PrepareSyncPairsForUse(hWnd, true);
 
-        EnableWindow(GetDlgItem(hWnd, IDC_ADD_PAIR), FALSE);
-        EnableWindow(GetDlgItem(hWnd, IDC_REMOVE_PAIR), FALSE);
-        EnableWindow(GetDlgItem(hWnd, IDC_START_SYNC), FALSE);
+        SetSyncControlsEnabled(hWnd, false);
 
         StartMonitoring(gSyncPairs, [hWnd](const std::wstring& message)
         {
@@ -746,7 +897,8 @@ void ToggleMonitoring(HWND hWnd)
             PostMessageW(hWnd, WM_UPDATE_PROGRESS, (WPARAM)(int)(progress * 100), 0);
         });
 
-        AppendLog(hWnd, L"[系统] 实时同步已开启...");
+        AppendLog(hWnd, L"[系统] 实时同步监控已启动...");
+        SetStatusText(L"实时同步运行中");
     }
     else
     {
@@ -754,11 +906,10 @@ void ToggleMonitoring(HWND hWnd)
 
         SaveSettings();
 
-        EnableWindow(GetDlgItem(hWnd, IDC_ADD_PAIR), TRUE);
-        EnableWindow(GetDlgItem(hWnd, IDC_REMOVE_PAIR), TRUE);
-        EnableWindow(GetDlgItem(hWnd, IDC_START_SYNC), TRUE);
+        SetSyncControlsEnabled(hWnd, true);
 
-        AppendLog(hWnd, L"[系统] 实时同步已关闭。");
+        AppendLog(hWnd, L"[系统] 实时同步监控已停止。");
+        SetStatusText(L"就绪");
     }
 }
 
@@ -837,10 +988,9 @@ void RefreshPairList()
             display = L"[" + pair.taskName + L"] " + paths;
         }
 
-        std::wstring settingsStr = L"";
-        settingsStr += pair.isBidirectional ? L"[双向]" : L"[单向]";
-        settingsStr += pair.deleteExtraFiles ? L"[删除同步]" : L"[不删除]";
-        settingsStr += pair.autoMonitor ? L"[监控开启]" : L"[监控关闭]";
+        std::wstring modeText = pair.isBidirectional ? L"双向合并" : L"单向复制";
+        std::wstring deleteText = pair.deleteExtraFiles ? L"镜像删除" : L"保留多余";
+        std::wstring monitorText = pair.autoMonitor ? L"已开启" : L"未开启";
 
         LVITEMW lvi = { 0 };
         lvi.mask = LVIF_TEXT | LVIF_PARAM;
@@ -849,8 +999,10 @@ void RefreshPairList()
         lvi.pszText = (LPWSTR)display.c_str();
         lvi.lParam = (LPARAM)i;
         ListView_InsertItem(hPairList, &lvi);
-        ListView_SetItemText(hPairList, i, 1, (LPWSTR)settingsStr.c_str());
-        ListView_SetItemText(hPairList, i, 2, (LPWSTR)L"[双击编辑任务]");
+        ListView_SetItemText(hPairList, i, 1, (LPWSTR)modeText.c_str());
+        ListView_SetItemText(hPairList, i, 2, (LPWSTR)deleteText.c_str());
+        ListView_SetItemText(hPairList, i, 3, (LPWSTR)monitorText.c_str());
+        ListView_SetItemText(hPairList, i, 4, (LPWSTR)L"双击编辑 / 右键更多");
     }
 }
 
