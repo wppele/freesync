@@ -469,7 +469,7 @@ namespace
     std::thread g_monitorThread;
     HANDLE g_stopEvent = nullptr;
 
-    void MonitorWorker(std::vector<SyncPair> pairs, SyncOptions options, SyncLogCallback log, ProgressCallback progress)
+    void MonitorWorker(std::vector<SyncPair> pairs, SyncLogCallback log, ProgressCallback progress)
     {
         // For accurate file monitoring, we should use ReadDirectoryChangesW.
         // However, rewriting the entire monitoring loop with Overlapped I/O for ReadDirectoryChangesW
@@ -480,6 +480,8 @@ namespace
         std::vector<HANDLE> handles;
         for (const auto& pair : pairs)
         {
+            if (!pair.autoMonitor) continue; // Skip pairs that don't have auto monitor enabled
+
             // 监控源文件夹
             HANDLE h = FindFirstChangeNotificationW(pair.source.c_str(), TRUE, 
                 FILE_NOTIFY_CHANGE_FILE_NAME | FILE_NOTIFY_CHANGE_DIR_NAME | FILE_NOTIFY_CHANGE_ATTRIBUTES | FILE_NOTIFY_CHANGE_SIZE | FILE_NOTIFY_CHANGE_LAST_WRITE);
@@ -572,7 +574,7 @@ namespace
                         pairs[pairIndex].triggeredRoot = isTargetTriggered ? pairs[pairIndex].target : pairs[pairIndex].source;
                         
                         WriteLog(log, L"[监控] 检测到变动，触发同步: " + pairs[pairIndex].source + L" <-> " + pairs[pairIndex].target);
-                        SyncFolderPair(pairs[pairIndex], options, log, progress);
+                        SyncFolderPair(pairs[pairIndex], log, progress);
                         
                         // 同步完成后，清理该任务关联的所有句柄在同步期间产生的积压信号（防止反馈环路）
                         int pairStartIdx = 0;
@@ -615,11 +617,11 @@ namespace
     }
 }
 
-void StartMonitoring(const std::vector<SyncPair>& pairs, const SyncOptions& options, SyncLogCallback log, ProgressCallback progress)
+void StartMonitoring(const std::vector<SyncPair>& pairs, SyncLogCallback log, ProgressCallback progress)
 {
     if (g_isMonitoring) return;
     g_isMonitoring = true;
-    g_monitorThread = std::thread(MonitorWorker, pairs, options, log, progress);
+    g_monitorThread = std::thread(MonitorWorker, pairs, log, progress);
 }
 
 void StopMonitoring()
@@ -741,7 +743,7 @@ bool DeleteSnapshotForPair(const SyncPair& pair, SyncLogCallback log)
     return ok;
 }
 
-SyncStats SyncFolderPair(const SyncPair& pair, const SyncOptions& options, SyncLogCallback log, ProgressCallback progress)
+SyncStats SyncFolderPair(const SyncPair& pair, SyncLogCallback log, ProgressCallback progress)
 {
     SyncStats stats;
     std::error_code ec;
@@ -1246,7 +1248,7 @@ SyncStats SyncFolderPair(const SyncPair& pair, const SyncOptions& options, SyncL
     else
     {
         syncOneWay(rootA, rootB);
-        if (options.deleteExtraFiles)
+        if (pair.deleteExtraFiles)
         {
             DeleteExtraTargetFiles(rootA, rootB, stats, log);
         }
@@ -1260,7 +1262,7 @@ SyncStats SyncFolderPair(const SyncPair& pair, const SyncOptions& options, SyncL
     return stats;
 }
 
-SyncStats SyncFolderPairs(const std::vector<SyncPair>& pairs, const SyncOptions& options, SyncLogCallback log, ProgressCallback progress)
+SyncStats SyncFolderPairs(const std::vector<SyncPair>& pairs, SyncLogCallback log, ProgressCallback progress)
 {
     SyncStats total;
     std::vector<std::future<SyncStats>> futures;
@@ -1271,8 +1273,8 @@ SyncStats SyncFolderPairs(const std::vector<SyncPair>& pairs, const SyncOptions&
     // 在这里，我们通过 future 来等待所有的同步结束。
     for (const auto& pair : pairs)
     {
-        futures.push_back(std::async(std::launch::async, [&pair, &options, log, progress]() {
-            return SyncFolderPair(pair, options, log, progress);
+        futures.push_back(std::async(std::launch::async, [&pair, log, progress]() {
+            return SyncFolderPair(pair, log, progress);
         }));
     }
 

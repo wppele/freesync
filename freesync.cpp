@@ -18,25 +18,10 @@
 #pragma comment(lib, "comctl32.lib")
 
 #define MAX_LOADSTRING 100
-#define IDC_SOURCE_EDIT 1001
-#define IDC_TARGET_EDIT 1002
-#define IDC_BROWSE_SOURCE 1003
-#define IDC_BROWSE_TARGET 1004
-#define IDC_ADD_PAIR 1005
-#define IDC_REMOVE_PAIR 1006
-#define IDC_PAIR_LIST 1007
-#define IDC_SYNC_LIST 1007
-#define IDC_DELETE_EXTRA 1008
-#define IDC_START_SYNC 1009
-#define IDC_LOG_EDIT 1010
-#define IDC_PROGRESS_BAR 1011
+
+// We use the defines from resource.h directly instead of redeclaring them
 #define IDC_AUTO_MONITOR 1012
 #define IDD_ADD_PAIR_DIALOG 2000
-#define IDC_DLG_SOURCE_EDIT 2001
-#define IDC_DLG_TARGET_EDIT 2002
-#define IDC_DLG_BROWSE_SOURCE 2003
-#define IDC_DLG_BROWSE_TARGET 2004
-#define IDC_DLG_BIDIRECTIONAL 2005
 
 #define WM_APPEND_LOG (WM_USER + 2)
 #define WM_SYNC_COMPLETE (WM_USER + 1)
@@ -50,7 +35,6 @@ WCHAR szWindowClass[MAX_LOADSTRING];            // the main window class name
 HWND hSourceEdit;
 HWND hTargetEdit;
 HWND hPairList;
-HWND hDeleteExtra;
 HWND hAutoMonitor;
 HWND hLogEdit;
 HWND hProgressBar;
@@ -82,6 +66,8 @@ bool                PrepareSyncPairsForUse(HWND hWnd, bool showMessageOnFailure)
 bool                CheckAndRecoverSinglePair(HWND hWnd, int index, bool showMessageOnFailure);
 void                LoadSettings(HWND hWnd);
 void                SaveSettings();
+void                ToggleAutoStart(HWND hWnd);
+bool                IsAutoStartEnabled();
 
 int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
                      _In_opt_ HINSTANCE hPrevInstance,
@@ -89,9 +75,13 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
                      _In_ int       nCmdShow)
 {
     UNREFERENCED_PARAMETER(hPrevInstance);
-    UNREFERENCED_PARAMETER(lpCmdLine);
 
     // TODO: Place code here.
+    bool startMinimized = false;
+    if (wcsstr(lpCmdLine, L"/minimized") != nullptr)
+    {
+        startMinimized = true;
+    }
 
     // Initialize global strings
     LoadStringW(hInstance, IDS_APP_TITLE, szTitle, MAX_LOADSTRING);
@@ -99,7 +89,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
     MyRegisterClass(hInstance);
 
     // Perform application initialization:
-    if (!InitInstance (hInstance, nCmdShow))
+    if (!InitInstance (hInstance, startMinimized ? SW_HIDE : nCmdShow))
     {
         return FALSE;
     }
@@ -211,13 +201,16 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
                 BrowseFolder(hWnd, hTargetEdit);
                 break;
             case IDC_ADD_PAIR:
-                DialogBox(hInst, MAKEINTRESOURCE(IDD_ADD_PAIR_DIALOG), hWnd, AddPairDlgProc);
+                DialogBoxParam(hInst, MAKEINTRESOURCE(IDD_ADD_PAIR_DIALOG), hWnd, AddPairDlgProc, -1); // -1 means add new
                 break;
             case IDC_REMOVE_PAIR:
                 RemoveSelectedSyncPair(hWnd);
                 break;
             case IDC_AUTO_MONITOR:
                 ToggleMonitoring(hWnd);
+                break;
+            case IDC_RUN_AT_STARTUP:
+                ToggleAutoStart(hWnd);
                 break;
             case IDC_START_SYNC:
                 StartSync(hWnd);
@@ -238,17 +231,18 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
         LPNMHDR pnmh = (LPNMHDR)lParam;
         if (pnmh->idFrom == IDC_SYNC_LIST && pnmh->code == NM_DBLCLK)
         {
-            // 如果实时同步已开启，则禁止手动双击同步
+            // 如果实时同步已开启，则禁止编辑任务（或者可以允许编辑但需要重启监控，这里简单起见禁止）
             if (SendMessageW(hAutoMonitor, BM_GETCHECK, 0, 0) == BST_CHECKED)
             {
-                MessageBoxW(hWnd, L"实时同步状态下此功能无效", L"提示", MB_OK | MB_ICONINFORMATION);
+                MessageBoxW(hWnd, L"实时同步状态下无法编辑任务，请先关闭实时同步", L"提示", MB_OK | MB_ICONINFORMATION);
                 return 0;
             }
 
             LPNMLISTVIEW pnmv = (LPNMLISTVIEW)lParam;
             if (pnmv->iItem != -1)
             {
-                StartSinglePairSync(hWnd, pnmv->iItem);
+                // 打开编辑窗口
+                DialogBoxParam(hInst, MAKEINTRESOURCE(IDD_ADD_PAIR_DIALOG), hWnd, AddPairDlgProc, (LPARAM)pnmv->iItem);
             }
         }
         break;
@@ -362,19 +356,28 @@ void CreateMainControls(HWND hWnd)
     LVCOLUMNW lvc = { 0 };
     lvc.mask = LVCF_TEXT | LVCF_WIDTH | LVCF_SUBITEM;
     lvc.pszText = (LPWSTR)L"同步任务";
-    lvc.cx = 650;
+    lvc.cx = 400;
     ListView_InsertColumn(hPairList, 0, &lvc);
+
+    lvc.pszText = (LPWSTR)L"设置";
+    lvc.cx = 250;
+    ListView_InsertColumn(hPairList, 1, &lvc);
 
     lvc.pszText = (LPWSTR)L"操作";
     lvc.cx = 150;
-    ListView_InsertColumn(hPairList, 1, &lvc);
+    ListView_InsertColumn(hPairList, 2, &lvc);
 
-    hDeleteExtra = CreateWindowW(L"BUTTON", L"同步删除文件", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
-        16, 236, 120, 24, hWnd, (HMENU)IDC_DELETE_EXTRA, hInst, nullptr);
-    hAutoMonitor = CreateWindowW(L"BUTTON", L"实时同步", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
-        156, 236, 90, 24, hWnd, (HMENU)IDC_AUTO_MONITOR, hInst, nullptr);
+    HWND hRunAtStartup = CreateWindowW(L"BUTTON", L"开机自动运行", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+        16, 236, 120, 24, hWnd, (HMENU)IDC_RUN_AT_STARTUP, hInst, nullptr);
+    if (IsAutoStartEnabled())
+    {
+        SendMessageW(hRunAtStartup, BM_SETCHECK, BST_CHECKED, 0);
+    }
+
+    hAutoMonitor = CreateWindowW(L"BUTTON", L"开启所有实时同步", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+        156, 236, 150, 24, hWnd, (HMENU)IDC_AUTO_MONITOR, hInst, nullptr);
     CreateWindowW(L"BUTTON", L"手动同步", WS_CHILD | WS_VISIBLE,
-        266, 233, 110, 30, hWnd, (HMENU)IDC_START_SYNC, hInst, nullptr);
+        326, 233, 110, 30, hWnd, (HMENU)IDC_START_SYNC, hInst, nullptr);
 
     CreateWindowW(L"STATIC", L"日志:", WS_CHILD | WS_VISIBLE,
         16, 276, 80, 24, hWnd, nullptr, hInst, nullptr);
@@ -442,9 +445,21 @@ void AppendLog(HWND hWnd, const std::wstring& text)
 
 INT_PTR CALLBACK AddPairDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM lParam)
 {
+    static int editIndex = -1;
+
     switch (message)
     {
     case WM_INITDIALOG:
+        editIndex = (int)lParam;
+        if (editIndex >= 0 && editIndex < (int)gSyncPairs.size())
+        {
+            const auto& pair = gSyncPairs[editIndex];
+            SetWindowTextW(GetDlgItem(hDlg, IDC_DLG_SOURCE_EDIT), pair.source.c_str());
+            SetWindowTextW(GetDlgItem(hDlg, IDC_DLG_TARGET_EDIT), pair.target.c_str());
+            CheckDlgButton(hDlg, IDC_DLG_BIDIRECTIONAL, pair.isBidirectional ? BST_CHECKED : BST_UNCHECKED);
+            CheckDlgButton(hDlg, IDC_DLG_DELETE_EXTRA, pair.deleteExtraFiles ? BST_CHECKED : BST_UNCHECKED);
+            CheckDlgButton(hDlg, IDC_DLG_AUTO_MONITOR, pair.autoMonitor ? BST_CHECKED : BST_UNCHECKED);
+        }
         DragAcceptFiles(hDlg, TRUE);
         return (INT_PTR)TRUE;
 
@@ -542,6 +557,8 @@ INT_PTR CALLBACK AddPairDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM l
             const std::wstring source = GetWindowTextString(GetDlgItem(hDlg, IDC_DLG_SOURCE_EDIT));
             const std::wstring target = GetWindowTextString(GetDlgItem(hDlg, IDC_DLG_TARGET_EDIT));
             const bool isBidirectional = IsDlgButtonChecked(hDlg, IDC_DLG_BIDIRECTIONAL) == BST_CHECKED;
+            const bool deleteExtraFiles = IsDlgButtonChecked(hDlg, IDC_DLG_DELETE_EXTRA) == BST_CHECKED;
+            const bool autoMonitor = IsDlgButtonChecked(hDlg, IDC_DLG_AUTO_MONITOR) == BST_CHECKED;
 
             if (source.empty() || target.empty())
             {
@@ -549,18 +566,22 @@ INT_PTR CALLBACK AddPairDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM l
                 return (INT_PTR)TRUE;
             }
 
-            SyncPair pair{ source, target, isBidirectional };
+            SyncPair pair{ source, target, isBidirectional, deleteExtraFiles, autoMonitor };
             CaptureSyncPairVolumeInfo(pair);
-            gSyncPairs.push_back(pair);
-            std::wstring display = source + L"  ->  " + target;
-            if (isBidirectional)
+            
+            if (editIndex >= 0 && editIndex < (int)gSyncPairs.size())
             {
-                display = source + L"  <->  " + target;
+                gSyncPairs[editIndex] = pair;
+                AppendLog(GetParent(hDlg), L"[修改任务] " + source + L" <-> " + target);
             }
-            SendMessageW(hPairList, LB_ADDSTRING, 0, (LPARAM)display.c_str());
+            else
+            {
+                gSyncPairs.push_back(pair);
+                AppendLog(GetParent(hDlg), L"[添加任务] " + source + L" <-> " + target);
+            }
+
             RefreshPairList();
             SaveSettings();
-            AppendLog(GetParent(hDlg), L"[添加任务] " + display);
             
             EndDialog(hDlg, LOWORD(wParam));
             return (INT_PTR)TRUE;
@@ -632,11 +653,9 @@ void StartSync(HWND hWnd)
     AppendLog(hWnd, L"[系统] 同步开始...");
 
     std::thread([hWnd]() {
-        SyncOptions options;
-        options.deleteExtraFiles = SendMessageW(hDeleteExtra, BM_GETCHECK, 0, 0) == BST_CHECKED;
         SaveSettings();
 
-        SyncFolderPairs(gSyncPairs, options, [hWnd](const std::wstring& message)
+        SyncFolderPairs(gSyncPairs, [hWnd](const std::wstring& message)
             {
                 // 使用 PostMessage 确保跨线程安全更新 UI
                 std::wstring* msg = new std::wstring(message);
@@ -666,11 +685,9 @@ void StartSinglePairSync(HWND hWnd, int index)
     SyncPair pair = gSyncPairs[index];
 
     std::thread([hWnd, pair]() {
-        SyncOptions options;
-        options.deleteExtraFiles = SendMessageW(hDeleteExtra, BM_GETCHECK, 0, 0) == BST_CHECKED;
         SaveSettings();
 
-        SyncFolderPair(pair, options, [hWnd](const std::wstring& message)
+        SyncFolderPair(pair, [hWnd](const std::wstring& message)
             {
                 std::wstring* msg = new std::wstring(message);
                 PostMessageW(hWnd, WM_APPEND_LOG, (WPARAM)msg, 0);
@@ -703,13 +720,8 @@ void ToggleMonitoring(HWND hWnd)
         EnableWindow(GetDlgItem(hWnd, IDC_ADD_PAIR), FALSE);
         EnableWindow(GetDlgItem(hWnd, IDC_REMOVE_PAIR), FALSE);
         EnableWindow(GetDlgItem(hWnd, IDC_START_SYNC), FALSE);
-        EnableWindow(hDeleteExtra, FALSE);
 
-        SyncOptions options;
-        options.deleteExtraFiles = SendMessageW(hDeleteExtra, BM_GETCHECK, 0, 0) == BST_CHECKED;
-        SaveSettings();
-
-        StartMonitoring(gSyncPairs, options, [hWnd](const std::wstring& message)
+        StartMonitoring(gSyncPairs, [hWnd](const std::wstring& message)
         {
             std::wstring* msg = new std::wstring(message);
             PostMessageW(hWnd, WM_APPEND_LOG, (WPARAM)msg, 0);
@@ -729,7 +741,6 @@ void ToggleMonitoring(HWND hWnd)
         EnableWindow(GetDlgItem(hWnd, IDC_ADD_PAIR), TRUE);
         EnableWindow(GetDlgItem(hWnd, IDC_REMOVE_PAIR), TRUE);
         EnableWindow(GetDlgItem(hWnd, IDC_START_SYNC), TRUE);
-        EnableWindow(hDeleteExtra, TRUE);
 
         AppendLog(hWnd, L"[系统] 实时同步已关闭。");
     }
@@ -804,6 +815,11 @@ void RefreshPairList()
             display = pair.source + L"  <->  " + pair.target;
         }
 
+        std::wstring settingsStr = L"";
+        settingsStr += pair.isBidirectional ? L"[双向]" : L"[单向]";
+        settingsStr += pair.deleteExtraFiles ? L"[删除同步]" : L"[不删除]";
+        settingsStr += pair.autoMonitor ? L"[监控开启]" : L"[监控关闭]";
+
         LVITEMW lvi = { 0 };
         lvi.mask = LVIF_TEXT | LVIF_PARAM;
         lvi.iItem = i;
@@ -811,7 +827,8 @@ void RefreshPairList()
         lvi.pszText = (LPWSTR)display.c_str();
         lvi.lParam = (LPARAM)i;
         ListView_InsertItem(hPairList, &lvi);
-        ListView_SetItemText(hPairList, i, 1, (LPWSTR)L"[双击同步此项]");
+        ListView_SetItemText(hPairList, i, 1, (LPWSTR)settingsStr.c_str());
+        ListView_SetItemText(hPairList, i, 2, (LPWSTR)L"[双击编辑任务]");
     }
 }
 
@@ -911,10 +928,8 @@ std::wstring GetConfigPath()
 void LoadSettings(HWND hWnd)
 {
     const std::wstring configPath = GetConfigPath();
-    const DWORD deleteExtra = GetPrivateProfileIntW(L"Settings", L"DeleteExtraFiles", 0, configPath.c_str());
-    const DWORD autoMonitor = GetPrivateProfileIntW(L"Settings", L"AutoMonitor", 0, configPath.c_str());
-    SendMessageW(hDeleteExtra, BM_SETCHECK, deleteExtra ? BST_CHECKED : BST_UNCHECKED, 0);
-    SendMessageW(hAutoMonitor, BM_SETCHECK, autoMonitor ? BST_CHECKED : BST_UNCHECKED, 0);
+    const DWORD autoMonitorAll = GetPrivateProfileIntW(L"Settings", L"AutoMonitorAll", 0, configPath.c_str());
+    SendMessageW(hAutoMonitor, BM_SETCHECK, autoMonitorAll ? BST_CHECKED : BST_UNCHECKED, 0);
 
     gSyncPairs.clear();
     const int count = (int)GetPrivateProfileIntW(L"Tasks", L"Count", 0, configPath.c_str());
@@ -929,6 +944,8 @@ void LoadSettings(HWND hWnd)
         const std::wstring sourceKey = L"Source" + std::to_wstring(i);
         const std::wstring targetKey = L"Target" + std::to_wstring(i);
         const std::wstring bidirKey = L"Bidirectional" + std::to_wstring(i);
+        const std::wstring deleteExtraKey = L"DeleteExtra" + std::to_wstring(i);
+        const std::wstring autoMonitorKey = L"AutoMonitor" + std::to_wstring(i);
         const std::wstring sourceVolumeGuidKey = L"SourceVolumeGuid" + std::to_wstring(i);
         const std::wstring sourceRelativePathKey = L"SourceRelativePath" + std::to_wstring(i);
         const std::wstring targetVolumeGuidKey = L"TargetVolumeGuid" + std::to_wstring(i);
@@ -940,9 +957,11 @@ void LoadSettings(HWND hWnd)
         GetPrivateProfileStringW(L"Tasks", targetVolumeGuidKey.c_str(), L"", targetVolumeGuid, ARRAYSIZE(targetVolumeGuid), configPath.c_str());
         GetPrivateProfileStringW(L"Tasks", targetRelativePathKey.c_str(), L"", targetRelativePath, ARRAYSIZE(targetRelativePath), configPath.c_str());
         const int isBidir = GetPrivateProfileIntW(L"Tasks", bidirKey.c_str(), 0, configPath.c_str());
+        const int deleteExtra = GetPrivateProfileIntW(L"Tasks", deleteExtraKey.c_str(), 0, configPath.c_str());
+        const int autoMonitor = GetPrivateProfileIntW(L"Tasks", autoMonitorKey.c_str(), 0, configPath.c_str());
         if (source[0] != L'\0' && target[0] != L'\0')
         {
-            SyncPair pair{ source, target, isBidir != 0 };
+            SyncPair pair{ source, target, isBidir != 0, deleteExtra != 0, autoMonitor != 0 };
             pair.sourceVolumeGuid = sourceVolumeGuid;
             pair.sourceRelativePath = sourceRelativePath;
             pair.targetVolumeGuid = targetVolumeGuid;
@@ -963,11 +982,11 @@ void LoadSettings(HWND hWnd)
         AppendLog(hWnd, L"已加载同步任务: " + std::to_wstring(gSyncPairs.size()) + L" 组");
     }
 
-    if (autoMonitor && !gSyncPairs.empty())
+    if (autoMonitorAll && !gSyncPairs.empty())
     {
         ToggleMonitoring(hWnd);
     }
-    else if (autoMonitor)
+    else if (autoMonitorAll)
     {
         SendMessageW(hAutoMonitor, BM_SETCHECK, BST_UNCHECKED, 0);
         AppendLog(hWnd, L"[系统] 未找到同步任务，已取消默认开启实时同步。 ");
@@ -993,9 +1012,7 @@ void SaveSettings()
         }
     }
 
-    WritePrivateProfileStringW(L"Settings", L"DeleteExtraFiles",
-        SendMessageW(hDeleteExtra, BM_GETCHECK, 0, 0) == BST_CHECKED ? L"1" : L"0", configPath.c_str());
-    WritePrivateProfileStringW(L"Settings", L"AutoMonitor",
+    WritePrivateProfileStringW(L"Settings", L"AutoMonitorAll",
         SendMessageW(hAutoMonitor, BM_GETCHECK, 0, 0) == BST_CHECKED ? L"1" : L"0", configPath.c_str());
     WritePrivateProfileStringW(L"Tasks", nullptr, nullptr, configPath.c_str());
     WritePrivateProfileStringW(L"Tasks", L"Count", std::to_wstring(gSyncPairs.size()).c_str(), configPath.c_str());
@@ -1005,6 +1022,8 @@ void SaveSettings()
         const std::wstring sourceKey = L"Source" + std::to_wstring(i);
         const std::wstring targetKey = L"Target" + std::to_wstring(i);
         const std::wstring bidirKey = L"Bidirectional" + std::to_wstring(i);
+        const std::wstring deleteExtraKey = L"DeleteExtra" + std::to_wstring(i);
+        const std::wstring autoMonitorKey = L"AutoMonitor" + std::to_wstring(i);
         const std::wstring sourceVolumeGuidKey = L"SourceVolumeGuid" + std::to_wstring(i);
         const std::wstring sourceRelativePathKey = L"SourceRelativePath" + std::to_wstring(i);
         const std::wstring targetVolumeGuidKey = L"TargetVolumeGuid" + std::to_wstring(i);
@@ -1012,6 +1031,8 @@ void SaveSettings()
         WritePrivateProfileStringW(L"Tasks", sourceKey.c_str(), gSyncPairs[i].source.c_str(), configPath.c_str());
         WritePrivateProfileStringW(L"Tasks", targetKey.c_str(), gSyncPairs[i].target.c_str(), configPath.c_str());
         WritePrivateProfileStringW(L"Tasks", bidirKey.c_str(), gSyncPairs[i].isBidirectional ? L"1" : L"0", configPath.c_str());
+        WritePrivateProfileStringW(L"Tasks", deleteExtraKey.c_str(), gSyncPairs[i].deleteExtraFiles ? L"1" : L"0", configPath.c_str());
+        WritePrivateProfileStringW(L"Tasks", autoMonitorKey.c_str(), gSyncPairs[i].autoMonitor ? L"1" : L"0", configPath.c_str());
         WritePrivateProfileStringW(L"Tasks", sourceVolumeGuidKey.c_str(), gSyncPairs[i].sourceVolumeGuid.c_str(), configPath.c_str());
         WritePrivateProfileStringW(L"Tasks", sourceRelativePathKey.c_str(), gSyncPairs[i].sourceRelativePath.c_str(), configPath.c_str());
         WritePrivateProfileStringW(L"Tasks", targetVolumeGuidKey.c_str(), gSyncPairs[i].targetVolumeGuid.c_str(), configPath.c_str());
@@ -1037,4 +1058,47 @@ INT_PTR CALLBACK About(HWND hDlg, UINT message, WPARAM wParam, LPARAM lParam)
         break;
     }
     return (INT_PTR)FALSE;
+}
+
+bool IsAutoStartEnabled()
+{
+    HKEY hKey;
+    LONG lRes = RegOpenKeyExW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Run", 0, KEY_READ, &hKey);
+    if (lRes == ERROR_SUCCESS)
+    {
+        WCHAR szPath[MAX_PATH];
+        DWORD dwSize = sizeof(szPath);
+        lRes = RegQueryValueExW(hKey, L"FreeSync", nullptr, nullptr, (LPBYTE)szPath, &dwSize);
+        RegCloseKey(hKey);
+        if (lRes == ERROR_SUCCESS)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+void ToggleAutoStart(HWND hWnd)
+{
+    HKEY hKey;
+    LONG lRes = RegOpenKeyExW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Run", 0, KEY_SET_VALUE | KEY_READ, &hKey);
+    if (lRes == ERROR_SUCCESS)
+    {
+        if (IsAutoStartEnabled())
+        {
+            // 已开启，则关闭
+            RegDeleteValueW(hKey, L"FreeSync");
+            AppendLog(hWnd, L"[系统] 已取消开机自启动。");
+        }
+        else
+        {
+            // 未开启，则开启
+            WCHAR szPath[MAX_PATH];
+            GetModuleFileNameW(nullptr, szPath, MAX_PATH);
+            std::wstring command = L"\"" + std::wstring(szPath) + L"\" /minimized";
+            RegSetValueExW(hKey, L"FreeSync", 0, REG_SZ, (const BYTE*)command.c_str(), (DWORD)((command.length() + 1) * sizeof(WCHAR)));
+            AppendLog(hWnd, L"[系统] 已设置开机自启动。");
+        }
+        RegCloseKey(hKey);
+    }
 }

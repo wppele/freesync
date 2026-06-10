@@ -21,6 +21,8 @@ struct SyncPair
     std::wstring source;
     std::wstring target;
     bool isBidirectional = false; // Add bidirectional flag
+    bool deleteExtraFiles = false; // Phase 2: Moved from SyncOptions
+    bool autoMonitor = false;      // Phase 2: Added auto monitor flag per task
     std::wstring sourceVolumeGuid;
     std::wstring sourceRelativePath;
     std::wstring targetVolumeGuid;
@@ -28,10 +30,7 @@ struct SyncPair
     std::wstring triggeredRoot; // 记录最近一次变动的根目录
 };
 
-struct SyncOptions
-{
-    bool deleteExtraFiles = false;
-};
+// Phase 2: Removed SyncOptions struct since its only member moved to SyncPair
 
 struct SyncStats
 {
@@ -59,7 +58,7 @@ using SyncLogCallback = std::function<void(const std::wstring&)>;
 using ProgressCallback = std::function<void(float)>;
 
 // 新增监控相关接口
-void StartMonitoring(const std::vector<SyncPair>& pairs, const SyncOptions& options, SyncLogCallback log, ProgressCallback progress);
+void StartMonitoring(const std::vector<SyncPair>& pairs, SyncLogCallback log, ProgressCallback progress);
 void StopMonitoring();
 bool IsMonitoring();
 
@@ -68,8 +67,8 @@ bool CaptureSyncPairVolumeInfo(SyncPair& pair);
 bool TryResolveSyncPairPaths(SyncPair& pair, SyncLogCallback log = nullptr);
 bool ResolveSyncPairPaths(std::vector<SyncPair>& pairs, SyncLogCallback log = nullptr);
 bool DeleteSnapshotForPair(const SyncPair& pair, SyncLogCallback log = nullptr);
-SyncStats SyncFolderPair(const SyncPair& pair, const SyncOptions& options, SyncLogCallback log, ProgressCallback progress);
-SyncStats SyncFolderPairs(const std::vector<SyncPair>& pairs, const SyncOptions& options, SyncLogCallback log, ProgressCallback progress);
+SyncStats SyncFolderPair(const SyncPair& pair, SyncLogCallback log, ProgressCallback progress);
+SyncStats SyncFolderPairs(const std::vector<SyncPair>& pairs, SyncLogCallback log, ProgressCallback progress);
 
 #define IDC_START_SYNC 1009
 #define IDC_LOG_EDIT 1010
