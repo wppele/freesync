@@ -454,6 +454,7 @@ INT_PTR CALLBACK AddPairDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM l
         if (editIndex >= 0 && editIndex < (int)gSyncPairs.size())
         {
             const auto& pair = gSyncPairs[editIndex];
+            SetWindowTextW(GetDlgItem(hDlg, IDC_DLG_TASK_NAME), pair.taskName.c_str());
             SetWindowTextW(GetDlgItem(hDlg, IDC_DLG_SOURCE_EDIT), pair.source.c_str());
             SetWindowTextW(GetDlgItem(hDlg, IDC_DLG_TARGET_EDIT), pair.target.c_str());
             CheckDlgButton(hDlg, IDC_DLG_BIDIRECTIONAL, pair.isBidirectional ? BST_CHECKED : BST_UNCHECKED);
@@ -554,6 +555,7 @@ INT_PTR CALLBACK AddPairDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM l
     case WM_COMMAND:
         if (LOWORD(wParam) == IDOK)
         {
+            std::wstring taskName = GetWindowTextString(GetDlgItem(hDlg, IDC_DLG_TASK_NAME));
             const std::wstring source = GetWindowTextString(GetDlgItem(hDlg, IDC_DLG_SOURCE_EDIT));
             const std::wstring target = GetWindowTextString(GetDlgItem(hDlg, IDC_DLG_TARGET_EDIT));
             const bool isBidirectional = IsDlgButtonChecked(hDlg, IDC_DLG_BIDIRECTIONAL) == BST_CHECKED;
@@ -566,18 +568,32 @@ INT_PTR CALLBACK AddPairDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM l
                 return (INT_PTR)TRUE;
             }
 
-            SyncPair pair{ source, target, isBidirectional, deleteExtraFiles, autoMonitor };
+            if (taskName.empty())
+            {
+                // 如果没有填写任务名称，使用源文件夹名作为默认名称
+                size_t pos = source.find_last_of(L"\\/");
+                if (pos != std::wstring::npos && pos + 1 < source.length())
+                {
+                    taskName = source.substr(pos + 1);
+                }
+                else
+                {
+                    taskName = L"新建任务";
+                }
+            }
+
+            SyncPair pair{ taskName, source, target, isBidirectional, deleteExtraFiles, autoMonitor };
             CaptureSyncPairVolumeInfo(pair);
             
             if (editIndex >= 0 && editIndex < (int)gSyncPairs.size())
             {
                 gSyncPairs[editIndex] = pair;
-                AppendLog(GetParent(hDlg), L"[修改任务] " + source + L" <-> " + target);
+                AppendLog(GetParent(hDlg), L"[修改任务] " + taskName + L": " + source + L" <-> " + target);
             }
             else
             {
                 gSyncPairs.push_back(pair);
-                AppendLog(GetParent(hDlg), L"[添加任务] " + source + L" <-> " + target);
+                AppendLog(GetParent(hDlg), L"[添加任务] " + taskName + L": " + source + L" <-> " + target);
             }
 
             RefreshPairList();
@@ -809,10 +825,16 @@ void RefreshPairList()
     for (int i = 0; i < (int)gSyncPairs.size(); ++i)
     {
         const auto& pair = gSyncPairs[i];
-        std::wstring display = pair.source + L"  ->  " + pair.target;
+        std::wstring paths = pair.source + L"  ->  " + pair.target;
         if (pair.isBidirectional)
         {
-            display = pair.source + L"  <->  " + pair.target;
+            paths = pair.source + L"  <->  " + pair.target;
+        }
+
+        std::wstring display = paths;
+        if (!pair.taskName.empty())
+        {
+            display = L"[" + pair.taskName + L"] " + paths;
         }
 
         std::wstring settingsStr = L"";
@@ -935,12 +957,14 @@ void LoadSettings(HWND hWnd)
     const int count = (int)GetPrivateProfileIntW(L"Tasks", L"Count", 0, configPath.c_str());
     for (int i = 0; i < count; ++i)
     {
+        WCHAR taskName[MAX_PATH]{};
         WCHAR source[MAX_PATH * 4]{};
         WCHAR target[MAX_PATH * 4]{};
         WCHAR sourceVolumeGuid[MAX_PATH * 4]{};
         WCHAR sourceRelativePath[MAX_PATH * 4]{};
         WCHAR targetVolumeGuid[MAX_PATH * 4]{};
         WCHAR targetRelativePath[MAX_PATH * 4]{};
+        const std::wstring taskNameKey = L"TaskName" + std::to_wstring(i);
         const std::wstring sourceKey = L"Source" + std::to_wstring(i);
         const std::wstring targetKey = L"Target" + std::to_wstring(i);
         const std::wstring bidirKey = L"Bidirectional" + std::to_wstring(i);
@@ -950,6 +974,7 @@ void LoadSettings(HWND hWnd)
         const std::wstring sourceRelativePathKey = L"SourceRelativePath" + std::to_wstring(i);
         const std::wstring targetVolumeGuidKey = L"TargetVolumeGuid" + std::to_wstring(i);
         const std::wstring targetRelativePathKey = L"TargetRelativePath" + std::to_wstring(i);
+        GetPrivateProfileStringW(L"Tasks", taskNameKey.c_str(), L"", taskName, ARRAYSIZE(taskName), configPath.c_str());
         GetPrivateProfileStringW(L"Tasks", sourceKey.c_str(), L"", source, ARRAYSIZE(source), configPath.c_str());
         GetPrivateProfileStringW(L"Tasks", targetKey.c_str(), L"", target, ARRAYSIZE(target), configPath.c_str());
         GetPrivateProfileStringW(L"Tasks", sourceVolumeGuidKey.c_str(), L"", sourceVolumeGuid, ARRAYSIZE(sourceVolumeGuid), configPath.c_str());
@@ -961,7 +986,7 @@ void LoadSettings(HWND hWnd)
         const int autoMonitor = GetPrivateProfileIntW(L"Tasks", autoMonitorKey.c_str(), 0, configPath.c_str());
         if (source[0] != L'\0' && target[0] != L'\0')
         {
-            SyncPair pair{ source, target, isBidir != 0, deleteExtra != 0, autoMonitor != 0 };
+            SyncPair pair{ taskName, source, target, isBidir != 0, deleteExtra != 0, autoMonitor != 0 };
             pair.sourceVolumeGuid = sourceVolumeGuid;
             pair.sourceRelativePath = sourceRelativePath;
             pair.targetVolumeGuid = targetVolumeGuid;
@@ -1019,6 +1044,7 @@ void SaveSettings()
 
     for (size_t i = 0; i < gSyncPairs.size(); ++i)
     {
+        const std::wstring taskNameKey = L"TaskName" + std::to_wstring(i);
         const std::wstring sourceKey = L"Source" + std::to_wstring(i);
         const std::wstring targetKey = L"Target" + std::to_wstring(i);
         const std::wstring bidirKey = L"Bidirectional" + std::to_wstring(i);
@@ -1028,6 +1054,7 @@ void SaveSettings()
         const std::wstring sourceRelativePathKey = L"SourceRelativePath" + std::to_wstring(i);
         const std::wstring targetVolumeGuidKey = L"TargetVolumeGuid" + std::to_wstring(i);
         const std::wstring targetRelativePathKey = L"TargetRelativePath" + std::to_wstring(i);
+        WritePrivateProfileStringW(L"Tasks", taskNameKey.c_str(), gSyncPairs[i].taskName.c_str(), configPath.c_str());
         WritePrivateProfileStringW(L"Tasks", sourceKey.c_str(), gSyncPairs[i].source.c_str(), configPath.c_str());
         WritePrivateProfileStringW(L"Tasks", targetKey.c_str(), gSyncPairs[i].target.c_str(), configPath.c_str());
         WritePrivateProfileStringW(L"Tasks", bidirKey.c_str(), gSyncPairs[i].isBidirectional ? L"1" : L"0", configPath.c_str());

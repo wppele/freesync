@@ -21,6 +21,7 @@
 #define IDC_DLG_BIDIRECTIONAL           2005
 #define IDC_DLG_DELETE_EXTRA            2006
 #define IDC_DLG_AUTO_MONITOR            2007
+#define IDC_DLG_TASK_NAME               2008
 
 #define IDC_SYNC_LIST                   1001
 #define IDC_BROWSE_SOURCE               1002

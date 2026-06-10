@@ -18,6 +18,7 @@ using SnapshotMap = std::unordered_map<std::wstring, FileSnapshot>;
 
 struct SyncPair
 {
+    std::wstring taskName; // 新增任务名称
     std::wstring source;
     std::wstring target;
     bool isBidirectional = false; // Add bidirectional flag
