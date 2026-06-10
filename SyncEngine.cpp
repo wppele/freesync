@@ -15,6 +15,7 @@
 #include <future>
 #include <unordered_set>
 #include <shlobj.h>
+#include <iomanip>
 
 namespace fs = std::filesystem;
 
@@ -252,39 +253,115 @@ namespace
         return false;
     }
 
-    bool ShouldCopyFile(const fs::path& sourceFile, const fs::path& targetFile)
+    std::wstring FormatFileTime(fs::file_time_type fileTime)
+    {
+        const auto systemTime = std::chrono::time_point_cast<std::chrono::system_clock::duration>(
+            fileTime - fs::file_time_type::clock::now() + std::chrono::system_clock::now());
+        const std::time_t time = std::chrono::system_clock::to_time_t(systemTime);
+        std::tm tm = {};
+        localtime_s(&tm, &time);
+
+        const auto milliseconds = std::chrono::duration_cast<std::chrono::milliseconds>(
+            systemTime.time_since_epoch()).count() % 1000;
+
+        std::wstringstream ss;
+        ss << std::put_time(&tm, L"%Y-%m-%d %H:%M:%S")
+            << L"." << std::setw(3) << std::setfill(L'0') << milliseconds;
+        return ss.str();
+    }
+
+    bool ShouldCopyFile(const fs::path& sourceFile, const fs::path& targetFile, SyncLogCallback& log)
     {
         std::error_code ec;
         if (!fs::exists(targetFile, ec))
         {
+            WriteLog(log, L"[复制原因] 目标不存在: " + targetFile.wstring());
             return true;
         }
 
         const auto sourceSize = fs::file_size(sourceFile, ec);
         if (ec)
         {
+            WriteLog(log, ErrorMessage(L"读取源文件大小", sourceFile, ec));
             return false;
         }
 
         const auto targetSize = fs::file_size(targetFile, ec);
-        if (ec || sourceSize != targetSize)
+        if (ec)
         {
+            WriteLog(log, ErrorMessage(L"读取目标文件大小", targetFile, ec));
+            WriteLog(log, L"[复制原因] 无法读取目标文件大小，尝试重新复制: " + targetFile.wstring());
+            return true;
+        }
+
+        if (sourceSize != targetSize)
+        {
+            WriteLog(log, L"[复制原因] 文件大小不同: " + sourceFile.wstring() +
+                L" (" + std::to_wstring(sourceSize) + L" 字节) -> " +
+                targetFile.wstring() + L" (" + std::to_wstring(targetSize) + L" 字节)");
             return true;
         }
 
         const auto sourceTime = fs::last_write_time(sourceFile, ec);
         if (ec)
         {
+            WriteLog(log, ErrorMessage(L"读取源文件时间", sourceFile, ec));
             return false;
         }
 
         const auto targetTime = fs::last_write_time(targetFile, ec);
         if (ec)
         {
+            WriteLog(log, ErrorMessage(L"读取目标文件时间", targetFile, ec));
+            WriteLog(log, L"[复制原因] 无法读取目标文件时间，尝试重新复制: " + targetFile.wstring());
             return true;
         }
 
-        return sourceTime > targetTime;
+        if (sourceTime > targetTime)
+        {
+            const auto diffMs = std::chrono::duration_cast<std::chrono::milliseconds>(sourceTime - targetTime).count();
+            WriteLog(log, L"[复制原因] 源文件时间较新: " + sourceFile.wstring() + L" -> " + targetFile.wstring() +
+                L"；源时间=" + FormatFileTime(sourceTime) +
+                L"，目标时间=" + FormatFileTime(targetTime) +
+                L"，差值=" + std::to_wstring(diffMs) + L"ms");
+            return true;
+        }
+
+        return false;
+    }
+
+    std::wstring MakeTimestampFolderName()
+    {
+        auto now = std::chrono::system_clock::now();
+        std::time_t time = std::chrono::system_clock::to_time_t(now);
+        std::tm tm = {};
+        localtime_s(&tm, &time);
+
+        std::wstringstream ss;
+        ss << std::put_time(&tm, L"%Y%m%d-%H%M%S");
+        return ss.str();
+    }
+
+    fs::path MakeUniquePath(fs::path path)
+    {
+        if (!fs::exists(path))
+        {
+            return path;
+        }
+
+        const fs::path parent = path.parent_path();
+        const std::wstring stem = path.stem().wstring();
+        const std::wstring extension = path.extension().wstring();
+        for (int i = 1; i < 10000; ++i)
+        {
+            fs::path candidate = parent / (stem + L" (" + std::to_wstring(i) + L")" + extension);
+            if (!fs::exists(candidate))
+            {
+                return candidate;
+            }
+        }
+
+        return parent / (path.filename().wstring() + L"." + std::to_wstring(GetTickCount64()));
     }
 
     void CopyFileIncremental(const fs::path& sourceFile, const fs::path& targetFile, SyncStats& stats, SyncLogCallback& log)
@@ -298,7 +375,7 @@ namespace
             return;
         }
 
-        if (!ShouldCopyFile(sourceFile, targetFile))
+        if (!ShouldCopyFile(sourceFile, targetFile, log))
         {
             stats.skippedFiles++;
             return;
@@ -334,6 +411,10 @@ namespace
         if (!ec)
         {
             fs::last_write_time(targetFile, sourceTime, ec);
+            if (ec)
+            {
+                WriteLog(log, ErrorMessage(L"设置目标文件时间", targetFile, ec));
+            }
         }
 
         stats.copiedFiles++;
@@ -348,6 +429,7 @@ namespace
             return;
         }
 
+        const fs::path trashRoot = targetRoot / L".freesync-trash" / MakeTimestampFolderName();
         std::unordered_set<std::wstring> sourceFiles;
         for (const auto& entry : fs::recursive_directory_iterator(sourceRoot, fs::directory_options::skip_permission_denied, ec))
         {
@@ -359,7 +441,9 @@ namespace
         }
 
         std::vector<fs::path> extraPaths;
-        for (const auto& entry : fs::recursive_directory_iterator(targetRoot, fs::directory_options::skip_permission_denied, ec))
+        fs::recursive_directory_iterator targetIt(targetRoot, fs::directory_options::skip_permission_denied, ec);
+        fs::recursive_directory_iterator endIt;
+        for (; targetIt != endIt; targetIt.increment(ec))
         {
             if (ec)
             {
@@ -369,34 +453,78 @@ namespace
                 continue;
             }
 
-            const fs::path relativePath = fs::relative(entry.path(), targetRoot, ec);
+            const fs::path entryPath = targetIt->path();
+            const bool isDirectory = targetIt->is_directory(ec);
+            if (ec)
+            {
+                ec.clear();
+            }
+
+            const fs::path relativePath = fs::relative(entryPath, targetRoot, ec);
             if (ec)
             {
                 stats.failedFiles++;
-                WriteLog(log, ErrorMessage(L"计算相对路径", entry.path(), ec));
+                WriteLog(log, ErrorMessage(L"计算相对路径", entryPath, ec));
                 ec.clear();
+                continue;
+            }
+
+            if (!relativePath.empty() && *relativePath.begin() == L".freesync-trash")
+            {
+                if (isDirectory)
+                {
+                    targetIt.disable_recursion_pending();
+                }
                 continue;
             }
 
             if (sourceFiles.find(relativePath.wstring()) == sourceFiles.end())
             {
-                extraPaths.push_back(entry.path());
+                extraPaths.push_back(entryPath);
+                if (isDirectory)
+                {
+                    targetIt.disable_recursion_pending();
+                }
             }
         }
 
         for (auto it = extraPaths.rbegin(); it != extraPaths.rend(); ++it)
         {
-            fs::remove_all(*it, ec);
+            const fs::path relativePath = fs::relative(*it, targetRoot, ec);
             if (ec)
             {
                 stats.failedFiles++;
-                WriteLog(log, ErrorMessage(L"删除目标多余项", *it, ec));
+                WriteLog(log, ErrorMessage(L"计算回收相对路径", *it, ec));
+                ec.clear();
+                continue;
+            }
+
+            if (!relativePath.empty() && *relativePath.begin() == L".freesync-trash")
+            {
+                continue;
+            }
+
+            fs::path trashPath = MakeUniquePath(trashRoot / relativePath);
+            fs::create_directories(trashPath.parent_path(), ec);
+            if (ec)
+            {
+                stats.failedFiles++;
+                WriteLog(log, ErrorMessage(L"创建回收目录", trashPath.parent_path(), ec));
+                ec.clear();
+                continue;
+            }
+
+            fs::rename(*it, trashPath, ec);
+            if (ec)
+            {
+                stats.failedFiles++;
+                WriteLog(log, ErrorMessage(L"移动目标多余项到回收区", *it, ec));
                 ec.clear();
             }
             else
             {
                 stats.deletedFiles++;
-                WriteLog(log, L"[删除] " + it->wstring());
+                WriteLog(log, L"[安全删除] " + it->wstring() + L" -> " + trashPath.wstring());
             }
         }
     }

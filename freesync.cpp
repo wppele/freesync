@@ -15,6 +15,7 @@
 #include <iomanip>
 #include <sstream>
 #include <chrono>
+#include <atomic>
 #pragma comment(lib, "comctl32.lib")
 #pragma comment(linker, "\"/manifestdependency:type='win32' name='Microsoft.Windows.Common-Controls' version='6.0.0.0' processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
 
@@ -44,6 +45,18 @@ HFONT hMainFont;
 NOTIFYICONDATAW nid = {};
 std::vector<SyncPair> gSyncPairs;
 
+struct TaskRunState
+{
+    std::wstring status = L"未运行";
+    unsigned long long copied = 0;
+    unsigned long long skipped = 0;
+    unsigned long long deleted = 0;
+    unsigned long long failed = 0;
+};
+
+std::vector<TaskRunState> gTaskStates;
+std::atomic<int> gActiveSyncJobs{ 0 };
+
 // Forward declarations of functions included in this code module:
 ATOM                MyRegisterClass(HINSTANCE hInstance);
 BOOL                InitInstance(HINSTANCE, int);
@@ -67,6 +80,15 @@ void                EditSelectedSyncPair(HWND hWnd);
 void                ShowTaskContextMenu(HWND hWnd, int x, int y);
 void                SetStatusText(const std::wstring& text);
 void                SetSyncControlsEnabled(HWND hWnd, bool enabled);
+void                SetTaskEditControlsEnabled(HWND hWnd, bool enabled);
+void                SetManualSyncControlsEnabled(HWND hWnd, bool enabled);
+void                EnsureTaskStates();
+void                SetTaskRunState(size_t index, const SyncStats& stats);
+std::wstring        FormatTaskRunState(size_t index);
+std::wstring        GetTaskSummaryText();
+int                 CountAutoMonitorTasks();
+void                SetMonitoringUi(HWND hWnd, bool monitoring);
+bool                IsMonitoringChecked();
 std::wstring        GetConfigPath();
 bool                PrepareSyncPairsForUse(HWND hWnd, bool showMessageOnFailure);
 bool                CheckAndRecoverSinglePair(HWND hWnd, int index, bool showMessageOnFailure);
@@ -257,7 +279,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
             EditSelectedSyncPair(hWnd);
             return 0;
         }
-        if (pnmh->idFrom == IDC_SYNC_LIST && pnmh->code == NM_RCLICK)
+    if (pnmh->idFrom == IDC_SYNC_LIST && pnmh->code == NM_RCLICK)
         {
             POINT pt;
             GetCursorPos(&pt);
@@ -297,10 +319,12 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
     }
     case WM_SYNC_COMPLETE:
     {
-        const bool monitoring = SendMessageW(hAutoMonitor, BM_GETCHECK, 0, 0) == BST_CHECKED;
+        const bool monitoring = IsMonitoringChecked();
         EnableWindow(hAutoMonitor, TRUE);
-        SetSyncControlsEnabled(hWnd, !monitoring);
+        SetTaskEditControlsEnabled(hWnd, !monitoring);
+        SetManualSyncControlsEnabled(hWnd, true);
         SendMessageW(hProgressBar, PBM_SETPOS, 100, 0);
+        RefreshPairList();
         SetStatusText(L"同步完成");
         return 0;
     }
@@ -341,7 +365,11 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
             GetCursorPos(&pt);
             HMENU hMenu = CreatePopupMenu();
             AppendMenuW(hMenu, MF_STRING, 1, L"显示窗口");
-            AppendMenuW(hMenu, MF_STRING, 2, L"退出程序");
+            AppendMenuW(hMenu, MF_STRING, 2, L"同步全部");
+            AppendMenuW(hMenu, MF_STRING, 3,
+                IsMonitoringChecked() ? L"停止实时同步监控" : L"启动实时同步监控");
+            AppendMenuW(hMenu, MF_SEPARATOR, 0, nullptr);
+            AppendMenuW(hMenu, MF_STRING, 4, L"退出程序");
             SetForegroundWindow(hWnd);
             int cmd = TrackPopupMenu(hMenu, TPM_RETURNCMD | TPM_NONOTIFY, pt.x, pt.y, 0, hWnd, nullptr);
             DestroyMenu(hMenu);
@@ -351,6 +379,16 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
                 SetForegroundWindow(hWnd);
             }
             else if (cmd == 2)
+            {
+                StartSync(hWnd);
+            }
+            else if (cmd == 3)
+            {
+                const bool checked = IsMonitoringChecked();
+                SendMessageW(hAutoMonitor, BM_SETCHECK, checked ? BST_UNCHECKED : BST_CHECKED, 0);
+                ToggleMonitoring(hWnd);
+            }
+            else if (cmd == 4)
             {
                 DestroyWindow(hWnd);
             }
@@ -399,19 +437,19 @@ void CreateMainControls(HWND hWnd)
     ListView_InsertColumn(hPairList, 0, &lvc);
 
     lvc.pszText = (LPWSTR)L"模式";
-    lvc.cx = 160;
+    lvc.cx = 90;
     ListView_InsertColumn(hPairList, 1, &lvc);
 
     lvc.pszText = (LPWSTR)L"删除策略";
-    lvc.cx = 120;
+    lvc.cx = 90;
     ListView_InsertColumn(hPairList, 2, &lvc);
 
     lvc.pszText = (LPWSTR)L"实时同步";
-    lvc.cx = 110;
+    lvc.cx = 90;
     ListView_InsertColumn(hPairList, 3, &lvc);
 
-    lvc.pszText = (LPWSTR)L"操作提示";
-    lvc.cx = 160;
+    lvc.pszText = (LPWSTR)L"最近结果";
+    lvc.cx = 260;
     ListView_InsertColumn(hPairList, 4, &lvc);
 
     HWND hRunAtStartup = CreateWindowW(L"BUTTON", L"开机自动运行", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
@@ -475,17 +513,17 @@ void ResizeMainControls(HWND hWnd)
     MoveWindow(hStatusLabel, margin, statusTop, contentWidth, 22, TRUE);
     MoveWindow(hProgressBar, margin, progressTop, contentWidth, 18, TRUE);
 
-    const int actionWidth = 150;
-    const int monitorWidth = 110;
-    const int deleteWidth = 120;
-    const int modeWidth = 150;
-    const int pathWidth = max(220, contentWidth - actionWidth - monitorWidth - deleteWidth - modeWidth - 8);
+    const int resultWidth = 260;
+    const int monitorWidth = 90;
+    const int deleteWidth = 90;
+    const int modeWidth = 90;
+    const int pathWidth = max(260, contentWidth - resultWidth - monitorWidth - deleteWidth - modeWidth - 8);
 
     ListView_SetColumnWidth(hPairList, 0, pathWidth);
     ListView_SetColumnWidth(hPairList, 1, modeWidth);
     ListView_SetColumnWidth(hPairList, 2, deleteWidth);
     ListView_SetColumnWidth(hPairList, 3, monitorWidth);
-    ListView_SetColumnWidth(hPairList, 4, actionWidth);
+    ListView_SetColumnWidth(hPairList, 4, resultWidth);
 }
 
 std::wstring GetWindowTextString(HWND hWnd)
@@ -536,11 +574,115 @@ void SetStatusText(const std::wstring& text)
 
 void SetSyncControlsEnabled(HWND hWnd, bool enabled)
 {
+    SetTaskEditControlsEnabled(hWnd, enabled);
+    SetManualSyncControlsEnabled(hWnd, enabled);
+}
+
+void SetTaskEditControlsEnabled(HWND hWnd, bool enabled)
+{
     EnableWindow(GetDlgItem(hWnd, IDC_ADD_PAIR), enabled);
     EnableWindow(GetDlgItem(hWnd, IDC_EDIT_PAIR), enabled);
     EnableWindow(GetDlgItem(hWnd, IDC_REMOVE_PAIR), enabled);
+}
+
+void SetManualSyncControlsEnabled(HWND hWnd, bool enabled)
+{
     EnableWindow(GetDlgItem(hWnd, IDC_SYNC_SELECTED), enabled);
     EnableWindow(GetDlgItem(hWnd, IDC_START_SYNC), enabled);
+}
+
+void EnsureTaskStates()
+{
+    if (gTaskStates.size() < gSyncPairs.size())
+    {
+        gTaskStates.resize(gSyncPairs.size());
+    }
+    else if (gTaskStates.size() > gSyncPairs.size())
+    {
+        gTaskStates.resize(gSyncPairs.size());
+    }
+}
+
+void SetTaskRunState(size_t index, const SyncStats& stats)
+{
+    EnsureTaskStates();
+    if (index >= gTaskStates.size())
+    {
+        return;
+    }
+
+    TaskRunState& state = gTaskStates[index];
+    state.copied = stats.copiedFiles.load();
+    state.skipped = stats.skippedFiles.load();
+    state.deleted = stats.deletedFiles.load();
+    state.failed = stats.failedFiles.load();
+    state.status = state.failed > 0 ? L"部分失败" : L"成功";
+}
+
+std::wstring FormatTaskRunState(size_t index)
+{
+    EnsureTaskStates();
+    if (index >= gTaskStates.size())
+    {
+        return L"未运行";
+    }
+
+    const TaskRunState& state = gTaskStates[index];
+    if (state.status == L"未运行")
+    {
+        return state.status;
+    }
+
+    return state.status + L"：复制 " + std::to_wstring(state.copied) +
+        L"，删除 " + std::to_wstring(state.deleted) +
+        L"，失败 " + std::to_wstring(state.failed);
+}
+
+std::wstring GetTaskSummaryText()
+{
+    int deleteEnabled = 0;
+    int autoMonitorEnabled = 0;
+    for (const auto& pair : gSyncPairs)
+    {
+        if (pair.deleteExtraFiles)
+        {
+            deleteEnabled++;
+        }
+        if (pair.autoMonitor)
+        {
+            autoMonitorEnabled++;
+        }
+    }
+
+    return L"任务 " + std::to_wstring(gSyncPairs.size()) +
+        L" 个；镜像删除 " + std::to_wstring(deleteEnabled) +
+        L" 个；实时同步 " + std::to_wstring(autoMonitorEnabled) + L" 个。";
+}
+
+int CountAutoMonitorTasks()
+{
+    int count = 0;
+    for (const auto& pair : gSyncPairs)
+    {
+        if (pair.autoMonitor)
+        {
+            count++;
+        }
+    }
+    return count;
+}
+
+void SetMonitoringUi(HWND hWnd, bool monitoring)
+{
+    SendMessageW(hAutoMonitor, BM_SETCHECK, monitoring ? BST_CHECKED : BST_UNCHECKED, 0);
+    SetTaskEditControlsEnabled(hWnd, !monitoring);
+    SetManualSyncControlsEnabled(hWnd, true);
+    SetStatusText(monitoring ? L"实时同步监控运行中" : L"就绪");
+}
+
+bool IsMonitoringChecked()
+{
+    return SendMessageW(hAutoMonitor, BM_GETCHECK, 0, 0) == BST_CHECKED;
 }
 
 void EditSelectedSyncPair(HWND hWnd)
@@ -575,9 +717,12 @@ void ShowTaskContextMenu(HWND hWnd, int x, int y)
     AppendMenuW(hMenu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(hMenu, MF_STRING, IDC_REMOVE_PAIR, L"删除任务");
 
-    if (SendMessageW(hAutoMonitor, BM_GETCHECK, 0, 0) == BST_CHECKED)
+    if (IsMonitoringChecked())
     {
-        EnableMenuItem(hMenu, IDC_SYNC_SELECTED, MF_BYCOMMAND | MF_GRAYED);
+        if (index >= 0 && index < (int)gSyncPairs.size() && gSyncPairs[index].autoMonitor)
+        {
+            EnableMenuItem(hMenu, IDC_SYNC_SELECTED, MF_BYCOMMAND | MF_GRAYED);
+        }
         EnableMenuItem(hMenu, IDC_EDIT_PAIR, MF_BYCOMMAND | MF_GRAYED);
         EnableMenuItem(hMenu, IDC_REMOVE_PAIR, MF_BYCOMMAND | MF_GRAYED);
     }
@@ -742,6 +887,7 @@ INT_PTR CALLBACK AddPairDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM l
             else
             {
                 gSyncPairs.push_back(pair);
+                EnsureTaskStates();
                 AppendLog(GetParent(hDlg), L"[添加任务] " + taskName + L": " + source + L" <-> " + target);
             }
 
@@ -794,8 +940,12 @@ void RemoveSelectedSyncPair(HWND hWnd)
         DeleteSnapshotForPair(removedPair, [hWnd](const std::wstring& message)
             {
                 AppendLog(hWnd, message);
-            });
+        });
         gSyncPairs.erase(gSyncPairs.begin() + index);
+        if (index >= 0 && index < (int)gTaskStates.size())
+        {
+            gTaskStates.erase(gTaskStates.begin() + index);
+        }
     }
     RefreshPairList();
     SaveSettings();
@@ -810,21 +960,50 @@ void StartSync(HWND hWnd)
         return;
     }
 
+    const bool monitoring = IsMonitoringChecked();
+    std::vector<size_t> taskIndexes;
+    taskIndexes.reserve(gSyncPairs.size());
+    for (size_t i = 0; i < gSyncPairs.size(); ++i)
+    {
+        if (!monitoring || !gSyncPairs[i].autoMonitor)
+        {
+            taskIndexes.push_back(i);
+        }
+    }
+
+    if (taskIndexes.empty())
+    {
+        MessageBoxW(hWnd, L"实时同步监控运行中，所有任务都已由监控接管，没有可手动同步的任务。", L"提示", MB_OK | MB_ICONINFORMATION);
+        return;
+    }
+
     // 检查并尝试恢复路径，即使有失败也继续尝试同步其他正常的任务
     PrepareSyncPairsForUse(hWnd, true);
 
     SetSyncControlsEnabled(hWnd, false);
     EnableWindow(hAutoMonitor, FALSE);
     SendMessageW(hProgressBar, PBM_SETPOS, 0, 0);
-    SetStatusText(L"正在同步全部任务...");
-    AppendLog(hWnd, L"[系统] 同步开始...");
+    SetStatusText(monitoring ? L"正在同步非实时任务..." : L"正在同步全部任务...");
+    if (monitoring)
+    {
+        AppendLog(hWnd, L"[系统] 实时同步监控运行中，本次仅手动同步未开启实时同步的任务。");
+    }
+    AppendLog(hWnd, L"[系统] 同步开始。" + GetTaskSummaryText());
 
-    std::thread([hWnd]() {
+    std::thread([hWnd, taskIndexes]() {
         SaveSettings();
 
-        SyncFolderPairs(gSyncPairs, [hWnd](const std::wstring& message)
+        SyncStats total;
+        std::vector<SyncPair> pairs = gSyncPairs;
+        for (size_t index : taskIndexes)
+        {
+            if (index >= pairs.size())
             {
-                // 使用 PostMessage 确保跨线程安全更新 UI
+                continue;
+            }
+
+            SyncStats current = SyncFolderPair(pairs[index], [hWnd](const std::wstring& message)
+            {
                 std::wstring* msg = new std::wstring(message);
                 PostMessageW(hWnd, WM_APPEND_LOG, (WPARAM)msg, 0);
             }, [hWnd](float progress)
@@ -832,6 +1011,20 @@ void StartSync(HWND hWnd)
                 PostMessageW(hWnd, WM_UPDATE_PROGRESS, (WPARAM)(int)(progress * 100), 0);
             });
 
+            total.copiedFiles += current.copiedFiles.load();
+            total.skippedFiles += current.skippedFiles.load();
+            total.deletedFiles += current.deletedFiles.load();
+            total.failedFiles += current.failedFiles.load();
+            SetTaskRunState(index, current);
+        }
+
+        std::wstring* summary = new std::wstring(
+            L"全部任务完成: 复制 " + std::to_wstring(total.copiedFiles.load()) +
+            L"，跳过 " + std::to_wstring(total.skippedFiles.load()) +
+            L"，删除 " + std::to_wstring(total.deletedFiles.load()) +
+            L"，失败 " + std::to_wstring(total.failedFiles.load()));
+        PostMessageW(hWnd, WM_APPEND_LOG, (WPARAM)summary, 0);
+        PostMessageW(hWnd, WM_UPDATE_PROGRESS, 100, 0);
         PostMessageW(hWnd, WM_SYNC_COMPLETE, 0, 0); // 通知同步完成
     }).detach();
 }
@@ -839,6 +1032,12 @@ void StartSync(HWND hWnd)
 void StartSinglePairSync(HWND hWnd, int index)
 {
     if (index < 0 || index >= (int)gSyncPairs.size()) return;
+
+    if (IsMonitoringChecked() && gSyncPairs[index].autoMonitor)
+    {
+        MessageBoxW(hWnd, L"该任务已启用实时同步监控，请停止监控后再手动同步此任务。", L"提示", MB_OK | MB_ICONINFORMATION);
+        return;
+    }
 
     if (!CheckAndRecoverSinglePair(hWnd, index, true))
     {
@@ -856,7 +1055,7 @@ void StartSinglePairSync(HWND hWnd, int index)
     std::thread([hWnd, pair]() {
         SaveSettings();
 
-        SyncFolderPair(pair, [hWnd](const std::wstring& message)
+        SyncStats stats = SyncFolderPair(pair, [hWnd](const std::wstring& message)
             {
                 std::wstring* msg = new std::wstring(message);
                 PostMessageW(hWnd, WM_APPEND_LOG, (WPARAM)msg, 0);
@@ -864,6 +1063,15 @@ void StartSinglePairSync(HWND hWnd, int index)
             {
                 PostMessageW(hWnd, WM_UPDATE_PROGRESS, (WPARAM)(int)(progress * 100), 0);
             });
+
+        for (size_t i = 0; i < gSyncPairs.size(); ++i)
+        {
+            if (gSyncPairs[i].source == pair.source && gSyncPairs[i].target == pair.target && gSyncPairs[i].taskName == pair.taskName)
+            {
+                SetTaskRunState(i, stats);
+                break;
+            }
+        }
 
         PostMessageW(hWnd, WM_SYNC_COMPLETE, 0, 0);
     }).detach();
@@ -883,10 +1091,18 @@ void ToggleMonitoring(HWND hWnd)
             return;
         }
 
+        if (CountAutoMonitorTasks() == 0)
+        {
+            MessageBoxW(hWnd, L"当前没有任务启用实时同步，请先在任务中勾选“实时同步”。", L"提示", MB_OK | MB_ICONINFORMATION);
+            SendMessageW(hAutoMonitor, BM_SETCHECK, BST_UNCHECKED, 0);
+            SaveSettings();
+            return;
+        }
+
         // 尝试恢复路径，即使有失败也允许开启监控（监控线程内部会重试）
         PrepareSyncPairsForUse(hWnd, true);
 
-        SetSyncControlsEnabled(hWnd, false);
+        SetMonitoringUi(hWnd, true);
 
         StartMonitoring(gSyncPairs, [hWnd](const std::wstring& message)
         {
@@ -898,7 +1114,6 @@ void ToggleMonitoring(HWND hWnd)
         });
 
         AppendLog(hWnd, L"[系统] 实时同步监控已启动...");
-        SetStatusText(L"实时同步运行中");
     }
     else
     {
@@ -906,10 +1121,9 @@ void ToggleMonitoring(HWND hWnd)
 
         SaveSettings();
 
-        SetSyncControlsEnabled(hWnd, true);
+        SetMonitoringUi(hWnd, false);
 
         AppendLog(hWnd, L"[系统] 实时同步监控已停止。");
-        SetStatusText(L"就绪");
     }
 }
 
@@ -972,6 +1186,7 @@ void ApplyMainFont(HWND hWnd)
 
 void RefreshPairList()
 {
+    EnsureTaskStates();
     ListView_DeleteAllItems(hPairList);
     for (int i = 0; i < (int)gSyncPairs.size(); ++i)
     {
@@ -989,7 +1204,7 @@ void RefreshPairList()
         }
 
         std::wstring modeText = pair.isBidirectional ? L"双向合并" : L"单向复制";
-        std::wstring deleteText = pair.deleteExtraFiles ? L"镜像删除" : L"保留多余";
+        std::wstring deleteText = pair.deleteExtraFiles ? L"安全删除" : L"保留多余";
         std::wstring monitorText = pair.autoMonitor ? L"已开启" : L"未开启";
 
         LVITEMW lvi = { 0 };
@@ -1002,7 +1217,8 @@ void RefreshPairList()
         ListView_SetItemText(hPairList, i, 1, (LPWSTR)modeText.c_str());
         ListView_SetItemText(hPairList, i, 2, (LPWSTR)deleteText.c_str());
         ListView_SetItemText(hPairList, i, 3, (LPWSTR)monitorText.c_str());
-        ListView_SetItemText(hPairList, i, 4, (LPWSTR)L"双击编辑 / 右键更多");
+        std::wstring stateText = FormatTaskRunState(i);
+        ListView_SetItemText(hPairList, i, 4, (LPWSTR)stateText.c_str());
     }
 }
 
@@ -1106,6 +1322,7 @@ void LoadSettings(HWND hWnd)
     SendMessageW(hAutoMonitor, BM_SETCHECK, autoMonitorAll ? BST_CHECKED : BST_UNCHECKED, 0);
 
     gSyncPairs.clear();
+    gTaskStates.clear();
     const int count = (int)GetPrivateProfileIntW(L"Tasks", L"Count", 0, configPath.c_str());
     for (int i = 0; i < count; ++i)
     {
