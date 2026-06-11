@@ -29,6 +29,7 @@
 #define WM_SYNC_COMPLETE (WM_USER + 1)
 #define WM_UPDATE_PROGRESS (WM_USER + 3)
 #define WM_TRAYICON (WM_USER + 4)
+#define WM_TASK_SYNC_COMPLETE (WM_USER + 5)
 
 // Global Variables:
 HINSTANCE hInst;                                // current instance
@@ -56,6 +57,12 @@ struct TaskRunState
 
 std::vector<TaskRunState> gTaskStates;
 std::atomic<int> gActiveSyncJobs{ 0 };
+
+struct TaskSyncResult
+{
+    int index = -1;
+    SyncStats stats;
+};
 
 // Forward declarations of functions included in this code module:
 ATOM                MyRegisterClass(HINSTANCE hInstance);
@@ -332,6 +339,17 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
     {
         SendMessageW(hProgressBar, PBM_SETPOS, (WPARAM)wParam, 0);
         SetStatusText(L"正在同步... " + std::to_wstring((int)wParam) + L"%");
+        return 0;
+    }
+    case WM_TASK_SYNC_COMPLETE:
+    {
+        TaskSyncResult* result = (TaskSyncResult*)wParam;
+        if (result)
+        {
+            SetTaskRunState((size_t)result->index, result->stats);
+            RefreshPairList();
+            delete result;
+        }
         return 0;
     }
     case WM_CLOSE:
@@ -979,6 +997,10 @@ void StartSync(HWND hWnd)
 
     // 检查并尝试恢复路径，即使有失败也继续尝试同步其他正常的任务
     PrepareSyncPairsForUse(hWnd, true);
+    CleanupOldTrashForPairs(gSyncPairs, 7, [hWnd](const std::wstring& message)
+    {
+        AppendLog(hWnd, message);
+    });
 
     SetSyncControlsEnabled(hWnd, false);
     EnableWindow(hAutoMonitor, FALSE);
@@ -1043,6 +1065,10 @@ void StartSinglePairSync(HWND hWnd, int index)
     {
         return;
     }
+    CleanupOldTrashForPairs(gSyncPairs, 7, [hWnd](const std::wstring& message)
+    {
+        AppendLog(hWnd, message);
+    });
 
     SetSyncControlsEnabled(hWnd, false);
     EnableWindow(hAutoMonitor, FALSE);
@@ -1101,6 +1127,10 @@ void ToggleMonitoring(HWND hWnd)
 
         // 尝试恢复路径，即使有失败也允许开启监控（监控线程内部会重试）
         PrepareSyncPairsForUse(hWnd, true);
+        CleanupOldTrashForPairs(gSyncPairs, 7, [hWnd](const std::wstring& message)
+        {
+            AppendLog(hWnd, message);
+        });
 
         SetMonitoringUi(hWnd, true);
 
@@ -1111,6 +1141,10 @@ void ToggleMonitoring(HWND hWnd)
         }, [hWnd](float progress)
         {
             PostMessageW(hWnd, WM_UPDATE_PROGRESS, (WPARAM)(int)(progress * 100), 0);
+        }, [hWnd](int index, const SyncStats& stats)
+        {
+            TaskSyncResult* result = new TaskSyncResult{ index, stats };
+            PostMessageW(hWnd, WM_TASK_SYNC_COMPLETE, (WPARAM)result, 0);
         });
 
         AppendLog(hWnd, L"[系统] 实时同步监控已启动...");

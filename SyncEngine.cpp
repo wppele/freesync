@@ -16,6 +16,7 @@
 #include <unordered_set>
 #include <shlobj.h>
 #include <iomanip>
+#include <cstring>
 
 namespace fs = std::filesystem;
 
@@ -364,6 +365,186 @@ namespace
         return parent / (path.filename().wstring() + L"." + std::to_wstring(GetTickCount64()));
     }
 
+    bool IsTrashRelativePath(const fs::path& relativePath)
+    {
+        return !relativePath.empty() && *relativePath.begin() == L".freesync-trash";
+    }
+
+    void EnsureTrashReadme(const fs::path& trashRoot, SyncLogCallback& log)
+    {
+        std::error_code ec;
+        fs::create_directories(trashRoot, ec);
+        if (ec)
+        {
+            WriteLog(log, ErrorMessage(L"创建回收区说明目录", trashRoot, ec));
+            ec.clear();
+            return;
+        }
+
+        const fs::path readmePath = trashRoot / L"请先阅读.txt";
+        if (fs::exists(readmePath, ec))
+        {
+            ec.clear();
+            return;
+        }
+
+        std::ofstream readme(readmePath, std::ios::binary);
+        if (!readme)
+        {
+            WriteLog(log, L"[提示] 无法创建回收区说明文件: " + readmePath.wstring());
+            return;
+        }
+
+        const char* content =
+            u8"这是 FreeSync 安全删除回收区。\r\n"
+            u8"\r\n"
+            u8"同步时被判定为需要删除的文件会先移动到这里，而不是直接永久删除。\r\n"
+            u8"确认这些文件不再需要后，可以手动删除本目录释放空间。\r\n"
+            u8"如果发现误删，可以从本目录按原相对路径找回文件。\r\n";
+        readme.write(content, (std::streamsize)strlen(content));
+    }
+
+    bool MovePathToTrash(const fs::path& root, const fs::path& trashRoot, const fs::path& path, SyncStats& stats, SyncLogCallback& log)
+    {
+        std::error_code ec;
+        if (!fs::exists(path, ec))
+        {
+            ec.clear();
+            return true;
+        }
+
+        const fs::path relativePath = fs::relative(path, root, ec);
+        if (ec)
+        {
+            stats.failedFiles++;
+            WriteLog(log, ErrorMessage(L"计算回收相对路径", path, ec));
+            ec.clear();
+            return false;
+        }
+
+        if (IsTrashRelativePath(relativePath))
+        {
+            return true;
+        }
+
+        EnsureTrashReadme(trashRoot, log);
+
+        const fs::path trashPath = MakeUniquePath(trashRoot / MakeTimestampFolderName() / relativePath);
+        fs::create_directories(trashPath.parent_path(), ec);
+        if (ec)
+        {
+            stats.failedFiles++;
+            WriteLog(log, ErrorMessage(L"创建回收目录", trashPath.parent_path(), ec));
+            ec.clear();
+            return false;
+        }
+
+        fs::rename(path, trashPath, ec);
+        if (ec)
+        {
+            stats.failedFiles++;
+            WriteLog(log, ErrorMessage(L"移动到回收区", path, ec));
+            ec.clear();
+            return false;
+        }
+
+        stats.deletedFiles++;
+        WriteLog(log, L"[安全删除] " + path.wstring() + L" -> " + trashPath.wstring());
+        return true;
+    }
+
+    bool TryParseTrashTimestamp(const std::wstring& name, std::tm& tm)
+    {
+        if (name.size() != 15 || name[8] != L'-')
+        {
+            return false;
+        }
+
+        for (size_t i = 0; i < name.size(); ++i)
+        {
+            if (i == 8)
+            {
+                continue;
+            }
+            if (name[i] < L'0' || name[i] > L'9')
+            {
+                return false;
+            }
+        }
+
+        tm = {};
+        tm.tm_year = std::stoi(name.substr(0, 4)) - 1900;
+        tm.tm_mon = std::stoi(name.substr(4, 2)) - 1;
+        tm.tm_mday = std::stoi(name.substr(6, 2));
+        tm.tm_hour = std::stoi(name.substr(9, 2));
+        tm.tm_min = std::stoi(name.substr(11, 2));
+        tm.tm_sec = std::stoi(name.substr(13, 2));
+        tm.tm_isdst = -1;
+        return true;
+    }
+
+    void CleanupOldTrashRoot(const fs::path& root, int retentionDays, SyncLogCallback& log)
+    {
+        if (retentionDays <= 0)
+        {
+            return;
+        }
+
+        std::error_code ec;
+        const fs::path trashRoot = root / L".freesync-trash";
+        if (!fs::exists(trashRoot, ec) || !fs::is_directory(trashRoot, ec))
+        {
+            ec.clear();
+            return;
+        }
+
+        const auto now = std::chrono::system_clock::now();
+        const auto retention = std::chrono::hours(24 * retentionDays);
+        for (const auto& entry : fs::directory_iterator(trashRoot, fs::directory_options::skip_permission_denied, ec))
+        {
+            if (ec)
+            {
+                WriteLog(log, ErrorMessage(L"遍历回收区", trashRoot, ec));
+                ec.clear();
+                break;
+            }
+
+            if (!entry.is_directory(ec))
+            {
+                ec.clear();
+                continue;
+            }
+
+            std::tm tm = {};
+            if (!TryParseTrashTimestamp(entry.path().filename().wstring(), tm))
+            {
+                continue;
+            }
+
+            const std::time_t folderTime = std::mktime(&tm);
+            if (folderTime == (std::time_t)-1)
+            {
+                continue;
+            }
+
+            const auto folderPoint = std::chrono::system_clock::from_time_t(folderTime);
+            if (now - folderPoint < retention)
+            {
+                continue;
+            }
+
+            fs::remove_all(entry.path(), ec);
+            if (ec)
+            {
+                WriteLog(log, ErrorMessage(L"清理过期回收区", entry.path(), ec));
+                ec.clear();
+                continue;
+            }
+
+            WriteLog(log, L"[清理回收区] 已删除超过 " + std::to_wstring(retentionDays) + L" 天的回收目录: " + entry.path().wstring());
+        }
+    }
+
     void CopyFileIncremental(const fs::path& sourceFile, const fs::path& targetFile, SyncStats& stats, SyncLogCallback& log)
     {
         std::error_code ec;
@@ -429,7 +610,7 @@ namespace
             return;
         }
 
-        const fs::path trashRoot = targetRoot / L".freesync-trash" / MakeTimestampFolderName();
+        const fs::path trashRoot = targetRoot / L".freesync-trash";
         std::unordered_set<std::wstring> sourceFiles;
         for (const auto& entry : fs::recursive_directory_iterator(sourceRoot, fs::directory_options::skip_permission_denied, ec))
         {
@@ -469,7 +650,7 @@ namespace
                 continue;
             }
 
-            if (!relativePath.empty() && *relativePath.begin() == L".freesync-trash")
+            if (IsTrashRelativePath(relativePath))
             {
                 if (isDirectory)
                 {
@@ -490,42 +671,7 @@ namespace
 
         for (auto it = extraPaths.rbegin(); it != extraPaths.rend(); ++it)
         {
-            const fs::path relativePath = fs::relative(*it, targetRoot, ec);
-            if (ec)
-            {
-                stats.failedFiles++;
-                WriteLog(log, ErrorMessage(L"计算回收相对路径", *it, ec));
-                ec.clear();
-                continue;
-            }
-
-            if (!relativePath.empty() && *relativePath.begin() == L".freesync-trash")
-            {
-                continue;
-            }
-
-            fs::path trashPath = MakeUniquePath(trashRoot / relativePath);
-            fs::create_directories(trashPath.parent_path(), ec);
-            if (ec)
-            {
-                stats.failedFiles++;
-                WriteLog(log, ErrorMessage(L"创建回收目录", trashPath.parent_path(), ec));
-                ec.clear();
-                continue;
-            }
-
-            fs::rename(*it, trashPath, ec);
-            if (ec)
-            {
-                stats.failedFiles++;
-                WriteLog(log, ErrorMessage(L"移动目标多余项到回收区", *it, ec));
-                ec.clear();
-            }
-            else
-            {
-                stats.deletedFiles++;
-                WriteLog(log, L"[安全删除] " + it->wstring() + L" -> " + trashPath.wstring());
-            }
+            MovePathToTrash(targetRoot, trashRoot, *it, stats, log);
         }
     }
 
@@ -604,7 +750,7 @@ namespace
         bool isTarget = false;
     };
 
-    void MonitorWorker(std::vector<SyncPair> pairs, SyncLogCallback log, ProgressCallback progress)
+    void MonitorWorker(std::vector<SyncPair> pairs, SyncLogCallback log, ProgressCallback progress, SyncTaskCompleteCallback taskComplete)
     {
         // For accurate file monitoring, we should use ReadDirectoryChangesW.
         // However, rewriting the entire monitoring loop with Overlapped I/O for ReadDirectoryChangesW
@@ -697,7 +843,11 @@ namespace
                         pairs[pairIndex].triggeredRoot = isTargetTriggered ? pairs[pairIndex].target : pairs[pairIndex].source;
                         
                         WriteLog(log, L"[监控] 检测到变动，触发同步: " + pairs[pairIndex].source + L" <-> " + pairs[pairIndex].target);
-                        SyncFolderPair(pairs[pairIndex], log, progress);
+                        SyncStats stats = SyncFolderPair(pairs[pairIndex], log, progress);
+                        if (taskComplete)
+                        {
+                            taskComplete(pairIndex, stats);
+                        }
                         
                         // 同步完成后，清理该任务关联的所有句柄在同步期间产生的积压信号（防止反馈环路）
                         for (size_t i = 0; i < handleInfos.size(); ++i)
@@ -740,11 +890,11 @@ namespace
     }
 }
 
-void StartMonitoring(const std::vector<SyncPair>& pairs, SyncLogCallback log, ProgressCallback progress)
+void StartMonitoring(const std::vector<SyncPair>& pairs, SyncLogCallback log, ProgressCallback progress, SyncTaskCompleteCallback taskComplete)
 {
     if (g_isMonitoring) return;
     g_isMonitoring = true;
-    g_monitorThread = std::thread(MonitorWorker, pairs, log, progress);
+    g_monitorThread = std::thread(MonitorWorker, pairs, log, progress, taskComplete);
 }
 
 void StopMonitoring()
@@ -866,6 +1016,33 @@ bool DeleteSnapshotForPair(const SyncPair& pair, SyncLogCallback log)
     return ok;
 }
 
+void CleanupOldTrashForPairs(const std::vector<SyncPair>& pairs, int retentionDays, SyncLogCallback log)
+{
+    SyncLogCallback logCopy = log;
+    std::unordered_set<std::wstring> roots;
+    for (const auto& pair : pairs)
+    {
+        if (!pair.deleteExtraFiles)
+        {
+            continue;
+        }
+
+        if (!pair.source.empty())
+        {
+            roots.insert(fs::path(pair.source).wstring());
+        }
+        if (!pair.target.empty())
+        {
+            roots.insert(fs::path(pair.target).wstring());
+        }
+    }
+
+    for (const auto& root : roots)
+    {
+        CleanupOldTrashRoot(fs::path(root), retentionDays, logCopy);
+    }
+}
+
 SyncStats SyncFolderPair(const SyncPair& pair, SyncLogCallback log, ProgressCallback progress)
 {
     SyncStats stats;
@@ -962,6 +1139,8 @@ SyncStats SyncFolderPair(const SyncPair& pair, SyncLogCallback log, ProgressCall
         SnapshotMap currentA;
         SnapshotMap currentB;
         std::mutex currentSnapshotMutex;
+        const fs::path trashRootA = rootA / L".freesync-trash";
+        const fs::path trashRootB = rootB / L".freesync-trash";
 
         auto scanDir = [](const fs::path& root, SnapshotMap& mapOut) {
             std::error_code ec;
@@ -1020,6 +1199,12 @@ SyncStats SyncFolderPair(const SyncPair& pair, SyncLogCallback log, ProgressCall
                                 fs::path childRelPath = currentTask.relPath.empty() 
                                     ? entry.path().filename() 
                                     : currentTask.relPath / entry.path().filename();
+
+                                if (IsTrashRelativePath(childRelPath)) {
+                                    localEc.clear();
+                                    it.increment(iterEc);
+                                    continue;
+                                }
 
                                 if (entry.is_directory(localEc)) {
                                     if (!localEc) {
@@ -1126,7 +1311,7 @@ SyncStats SyncFolderPair(const SyncPair& pair, SyncLogCallback log, ProgressCall
             return false;
         };
 
-        auto removeDirectoryTree = [&](const fs::path& path, const std::wstring& relPathStr)
+        auto moveDirectoryTreeToTrash = [&](const fs::path& root, const fs::path& trashRoot, const fs::path& path, const std::wstring& relPathStr)
         {
             std::error_code ec;
             if (!fs::exists(path, ec))
@@ -1136,18 +1321,9 @@ SyncStats SyncFolderPair(const SyncPair& pair, SyncLogCallback log, ProgressCall
                 return;
             }
 
-            fs::remove_all(path, ec);
-            if (ec)
+            if (MovePathToTrash(root, trashRoot, path, stats, log))
             {
-                stats.failedFiles++;
-                WriteLog(log, ErrorMessage(L"删除目录", path, ec));
-                ec.clear();
-            }
-            else
-            {
-                stats.deletedFiles++;
                 deletedDirectories.insert(relPathStr);
-                WriteLog(log, L"[删除目录] " + path.wstring());
             }
         };
 
@@ -1186,7 +1362,7 @@ SyncStats SyncFolderPair(const SyncPair& pair, SyncLogCallback log, ProgressCall
                 {
                     if (inSnap)
                     {
-                        removeDirectoryTree(pathA, relPathStr);
+                        moveDirectoryTreeToTrash(rootA, trashRootA, pathA, relPathStr);
                     }
                     else
                     {
@@ -1197,7 +1373,7 @@ SyncStats SyncFolderPair(const SyncPair& pair, SyncLogCallback log, ProgressCall
                 {
                     if (inSnap)
                     {
-                        removeDirectoryTree(pathB, relPathStr);
+                        moveDirectoryTreeToTrash(rootB, trashRootB, pathB, relPathStr);
                     }
                     else
                     {
@@ -1253,13 +1429,9 @@ SyncStats SyncFolderPair(const SyncPair& pair, SyncLogCallback log, ProgressCall
                 }
             } else if (inA && !inB) {
                 if (inSnap && !aChanged) {
-                    // Deleted in B, no change in A -> Delete in A
-                    if (fs::remove(pathA, ec))
-                    {
-                        stats.deletedFiles++;
-                        DeleteEmptyParentDirectories(rootA, pathA.parent_path(), stats, log);
-                    }
-                    else stats.failedFiles++;
+                    // Deleted in B, no change in A -> move A to trash
+                    MovePathToTrash(rootA, trashRootA, pathA, stats, log);
+                    DeleteEmptyParentDirectories(rootA, pathA.parent_path(), stats, log);
                 } else {
                     // New in A, or modified in A and deleted in B -> Copy to B
                     CopyFileIncremental(pathA, pathB, stats, log);
@@ -1268,13 +1440,9 @@ SyncStats SyncFolderPair(const SyncPair& pair, SyncLogCallback log, ProgressCall
                 }
             } else if (!inA && inB) {
                 if (inSnap && !bChanged) {
-                    // Deleted in A, no change in B -> Delete in B
-                    if (fs::remove(pathB, ec))
-                    {
-                        stats.deletedFiles++;
-                        DeleteEmptyParentDirectories(rootB, pathB.parent_path(), stats, log);
-                    }
-                    else stats.failedFiles++;
+                    // Deleted in A, no change in B -> move B to trash
+                    MovePathToTrash(rootB, trashRootB, pathB, stats, log);
+                    DeleteEmptyParentDirectories(rootB, pathB.parent_path(), stats, log);
                 } else {
                     // New in B, or modified in B and deleted in A -> Copy to A
                     CopyFileIncremental(pathB, pathA, stats, log);

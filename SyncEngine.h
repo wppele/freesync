@@ -57,9 +57,10 @@ struct SyncStats
 
 using SyncLogCallback = std::function<void(const std::wstring&)>;
 using ProgressCallback = std::function<void(float)>;
+using SyncTaskCompleteCallback = std::function<void(int, const SyncStats&)>;
 
 // 新增监控相关接口
-void StartMonitoring(const std::vector<SyncPair>& pairs, SyncLogCallback log, ProgressCallback progress);
+void StartMonitoring(const std::vector<SyncPair>& pairs, SyncLogCallback log, ProgressCallback progress, SyncTaskCompleteCallback taskComplete = nullptr);
 void StopMonitoring();
 bool IsMonitoring();
 
@@ -68,6 +69,7 @@ bool CaptureSyncPairVolumeInfo(SyncPair& pair);
 bool TryResolveSyncPairPaths(SyncPair& pair, SyncLogCallback log = nullptr);
 bool ResolveSyncPairPaths(std::vector<SyncPair>& pairs, SyncLogCallback log = nullptr);
 bool DeleteSnapshotForPair(const SyncPair& pair, SyncLogCallback log = nullptr);
+void CleanupOldTrashForPairs(const std::vector<SyncPair>& pairs, int retentionDays, SyncLogCallback log = nullptr);
 SyncStats SyncFolderPair(const SyncPair& pair, SyncLogCallback log, ProgressCallback progress);
 SyncStats SyncFolderPairs(const std::vector<SyncPair>& pairs, SyncLogCallback log, ProgressCallback progress);
 
