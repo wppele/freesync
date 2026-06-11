@@ -254,23 +254,6 @@ namespace
         return false;
     }
 
-    std::wstring FormatFileTime(fs::file_time_type fileTime)
-    {
-        const auto systemTime = std::chrono::time_point_cast<std::chrono::system_clock::duration>(
-            fileTime - fs::file_time_type::clock::now() + std::chrono::system_clock::now());
-        const std::time_t time = std::chrono::system_clock::to_time_t(systemTime);
-        std::tm tm = {};
-        localtime_s(&tm, &time);
-
-        const auto milliseconds = std::chrono::duration_cast<std::chrono::milliseconds>(
-            systemTime.time_since_epoch()).count() % 1000;
-
-        std::wstringstream ss;
-        ss << std::put_time(&tm, L"%Y-%m-%d %H:%M:%S")
-            << L"." << std::setw(3) << std::setfill(L'0') << milliseconds;
-        return ss.str();
-    }
-
     bool ShouldCopyFile(const fs::path& sourceFile, const fs::path& targetFile, SyncLogCallback& log)
     {
         std::error_code ec;
@@ -320,11 +303,7 @@ namespace
 
         if (sourceTime > targetTime)
         {
-            const auto diffMs = std::chrono::duration_cast<std::chrono::milliseconds>(sourceTime - targetTime).count();
-            WriteLog(log, L"[复制原因] 源文件时间较新: " + sourceFile.wstring() + L" -> " + targetFile.wstring() +
-                L"；源时间=" + FormatFileTime(sourceTime) +
-                L"，目标时间=" + FormatFileTime(targetTime) +
-                L"，差值=" + std::to_wstring(diffMs) + L"ms");
+            WriteLog(log, L"[复制原因] 源文件时间较新: " + sourceFile.wstring() + L" -> " + targetFile.wstring());
             return true;
         }
 
