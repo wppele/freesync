@@ -59,7 +59,6 @@ struct TaskRunState
 };
 
 std::vector<TaskRunState> gTaskStates;
-std::atomic<int> gActiveSyncJobs{ 0 };
 
 struct TaskSyncResult
 {
@@ -121,7 +120,6 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
     icc.dwICC = ICC_LISTVIEW_CLASSES | ICC_PROGRESS_CLASS | ICC_STANDARD_CLASSES;
     InitCommonControlsEx(&icc);
 
-    // TODO: Place code here.
     bool startMinimized = false;
     if (wcsstr(lpCmdLine, L"/minimized") != nullptr)
     {
@@ -135,7 +133,13 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
     gSingleInstanceMutex = CreateMutexW(nullptr, TRUE, SINGLE_INSTANCE_MUTEX_NAME);
     if (gSingleInstanceMutex && GetLastError() == ERROR_ALREADY_EXISTS)
     {
-        ActivateExistingInstance();
+        if (!ActivateExistingInstance())
+        {
+            MessageBoxW(nullptr,
+                L"检测到 FreeSync 已在运行，但无法显示已有窗口。请稍后重试，或在任务管理器中结束 freesync.exe 后再启动。",
+                L"FreeSync 已在运行",
+                MB_OK | MB_ICONINFORMATION);
+        }
         CloseHandle(gSingleInstanceMutex);
         gSingleInstanceMutex = nullptr;
         return FALSE;
@@ -360,37 +364,25 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
             EditSelectedSyncPair(hWnd);
             return 0;
         }
-    if (pnmh->idFrom == IDC_SYNC_LIST && pnmh->code == NM_RCLICK)
+        if (pnmh->idFrom == IDC_SYNC_LIST && pnmh->code == NM_RCLICK)
         {
             POINT pt;
             GetCursorPos(&pt);
-            HMENU hMenu = CreatePopupMenu();
-            AppendMenuW(hMenu, MF_STRING, 1, L"显示窗口");
-            AppendMenuW(hMenu, MF_STRING, 2, L"同步全部");
-            AppendMenuW(hMenu, MF_STRING, 3,
-                IsMonitoringChecked() ? L"停止实时同步监控" : L"启动实时同步监控");
-            AppendMenuW(hMenu, MF_SEPARATOR, 0, nullptr);
-            AppendMenuW(hMenu, MF_STRING, 4, L"退出程序");
-            SetForegroundWindow(hWnd);
-            int cmd = TrackPopupMenu(hMenu, TPM_RETURNCMD | TPM_NONOTIFY, pt.x, pt.y, 0, hWnd, nullptr);
-            DestroyMenu(hMenu);
-            if (cmd == 1)
+            ShowTaskContextMenu(hWnd, pt.x, pt.y);
+            return 0;
+        }
+        if (pnmh->idFrom == IDC_SYNC_LIST && pnmh->code == LVN_KEYDOWN)
+        {
+            NMLVKEYDOWN* key = (NMLVKEYDOWN*)lParam;
+            if (key->wVKey == VK_DELETE)
             {
-                ShowMainWindow(hWnd);
+                RemoveSelectedSyncPair(hWnd);
+                return 0;
             }
-            else if (cmd == 2)
+            if (key->wVKey == VK_RETURN)
             {
-                StartSync(hWnd);
-            }
-            else if (cmd == 3)
-            {
-                const bool checked = IsMonitoringChecked();
-                SendMessageW(hAutoMonitor, BM_SETCHECK, checked ? BST_UNCHECKED : BST_CHECKED, 0);
-                ToggleMonitoring(hWnd);
-            }
-            else if (cmd == 4)
-            {
-                DestroyWindow(hWnd);
+                EditSelectedSyncPair(hWnd);
+                return 0;
             }
         }
         return 0;
@@ -399,7 +391,6 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
         {
             PAINTSTRUCT ps;
             HDC hdc = BeginPaint(hWnd, &ps);
-            // TODO: Add any drawing code that uses hdc here...
             EndPaint(hWnd, &ps);
         }
         break;
@@ -1096,11 +1087,11 @@ void StartSync(HWND hWnd)
     }
     AppendLog(hWnd, L"[系统] 同步开始。" + GetTaskSummaryText());
 
-    std::thread([hWnd, taskIndexes]() {
-        SaveSettings();
+    SaveSettings();
+    std::vector<SyncPair> pairs = gSyncPairs;
 
+    std::thread([hWnd, taskIndexes, pairs]() {
         SyncStats total;
-        std::vector<SyncPair> pairs = gSyncPairs;
         for (size_t index : taskIndexes)
         {
             if (index >= pairs.size())
@@ -1121,7 +1112,9 @@ void StartSync(HWND hWnd)
             total.skippedFiles += current.skippedFiles.load();
             total.deletedFiles += current.deletedFiles.load();
             total.failedFiles += current.failedFiles.load();
-            SetTaskRunState(index, current);
+
+            TaskSyncResult* result = new TaskSyncResult{ (int)index, current };
+            PostMessageW(hWnd, WM_TASK_SYNC_COMPLETE, (WPARAM)result, 0);
         }
 
         std::wstring* summary = new std::wstring(
@@ -1161,10 +1154,9 @@ void StartSinglePairSync(HWND hWnd, int index)
     AppendLog(hWnd, L"[系统] 开始同步单项任务...");
 
     SyncPair pair = gSyncPairs[index];
+    SaveSettings();
 
-    std::thread([hWnd, pair]() {
-        SaveSettings();
-
+    std::thread([hWnd, index, pair]() {
         SyncStats stats = SyncFolderPair(pair, [hWnd](const std::wstring& message)
             {
                 std::wstring* msg = new std::wstring(message);
@@ -1174,14 +1166,8 @@ void StartSinglePairSync(HWND hWnd, int index)
                 PostMessageW(hWnd, WM_UPDATE_PROGRESS, (WPARAM)(int)(progress * 100), 0);
             });
 
-        for (size_t i = 0; i < gSyncPairs.size(); ++i)
-        {
-            if (gSyncPairs[i].source == pair.source && gSyncPairs[i].target == pair.target && gSyncPairs[i].taskName == pair.taskName)
-            {
-                SetTaskRunState(i, stats);
-                break;
-            }
-        }
+        TaskSyncResult* result = new TaskSyncResult{ index, stats };
+        PostMessageW(hWnd, WM_TASK_SYNC_COMPLETE, (WPARAM)result, 0);
 
         PostMessageW(hWnd, WM_SYNC_COMPLETE, 0, 0);
     }).detach();
