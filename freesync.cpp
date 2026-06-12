@@ -30,6 +30,7 @@
 #define WM_UPDATE_PROGRESS (WM_USER + 3)
 #define WM_TRAYICON (WM_USER + 4)
 #define WM_TASK_SYNC_COMPLETE (WM_USER + 5)
+#define WM_SHOW_MAIN_WINDOW (WM_USER + 6)
 
 // Global Variables:
 HINSTANCE hInst;                                // current instance
@@ -45,6 +46,8 @@ HWND hStatusLabel;
 HFONT hMainFont;
 NOTIFYICONDATAW nid = {};
 std::vector<SyncPair> gSyncPairs;
+HANDLE gSingleInstanceMutex = nullptr;
+constexpr const wchar_t* SINGLE_INSTANCE_MUTEX_NAME = L"Local\\FreeSync_SingleInstance_v26_0611";
 
 struct TaskRunState
 {
@@ -103,6 +106,8 @@ void                LoadSettings(HWND hWnd);
 void                SaveSettings();
 void                ToggleAutoStart(HWND hWnd);
 bool                IsAutoStartEnabled();
+bool                ActivateExistingInstance();
+void                ShowMainWindow(HWND hWnd);
 
 int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
                      _In_opt_ HINSTANCE hPrevInstance,
@@ -126,11 +131,26 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
     // Initialize global strings
     LoadStringW(hInstance, IDS_APP_TITLE, szTitle, MAX_LOADSTRING);
     LoadStringW(hInstance, IDC_FREESYNC, szWindowClass, MAX_LOADSTRING);
+
+    gSingleInstanceMutex = CreateMutexW(nullptr, TRUE, SINGLE_INSTANCE_MUTEX_NAME);
+    if (gSingleInstanceMutex && GetLastError() == ERROR_ALREADY_EXISTS)
+    {
+        ActivateExistingInstance();
+        CloseHandle(gSingleInstanceMutex);
+        gSingleInstanceMutex = nullptr;
+        return FALSE;
+    }
+
     MyRegisterClass(hInstance);
 
     // Perform application initialization:
     if (!InitInstance (hInstance, startMinimized ? SW_HIDE : nCmdShow))
     {
+        if (gSingleInstanceMutex)
+        {
+            CloseHandle(gSingleInstanceMutex);
+            gSingleInstanceMutex = nullptr;
+        }
         return FALSE;
     }
 
@@ -146,6 +166,12 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
             TranslateMessage(&msg);
             DispatchMessage(&msg);
         }
+    }
+
+    if (gSingleInstanceMutex)
+    {
+        CloseHandle(gSingleInstanceMutex);
+        gSingleInstanceMutex = nullptr;
     }
 
     return (int) msg.wParam;
@@ -207,6 +233,45 @@ BOOL InitInstance(HINSTANCE hInstance, int nCmdShow)
    return TRUE;
 }
 
+bool ActivateExistingInstance()
+{
+    HWND hWnd = nullptr;
+    for (int i = 0; i < 20 && !hWnd; ++i)
+    {
+        hWnd = FindWindowW(szWindowClass, nullptr);
+        if (!hWnd)
+        {
+            hWnd = FindWindowW(nullptr, szTitle);
+        }
+        if (!hWnd)
+        {
+            Sleep(100);
+        }
+    }
+
+    if (!hWnd)
+    {
+        return false;
+    }
+
+    PostMessageW(hWnd, WM_SHOW_MAIN_WINDOW, 0, 0);
+    ShowMainWindow(hWnd);
+    return true;
+}
+
+void ShowMainWindow(HWND hWnd)
+{
+    if (!hWnd)
+    {
+        return;
+    }
+
+    ShowWindow(hWnd, SW_RESTORE);
+    ShowWindow(hWnd, SW_SHOW);
+    BringWindowToTop(hWnd);
+    SetForegroundWindow(hWnd);
+}
+
 //
 //  FUNCTION: WndProc(HWND, UINT, WPARAM, LPARAM)
 //
@@ -225,6 +290,15 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
         CreateMainControls(hWnd);
         SetupTrayIcon(hWnd);
         break;
+    case WM_SHOW_MAIN_WINDOW:
+        ShowMainWindow(hWnd);
+        return 0;
+    case WM_CTLCOLORSTATIC:
+    {
+        HDC hdcStatic = (HDC)wParam;
+        SetBkMode(hdcStatic, TRANSPARENT);
+        return (LRESULT)GetSysColorBrush(COLOR_WINDOW);
+    }
     case WM_SIZE:
         ResizeMainControls(hWnd);
         break;
@@ -290,24 +364,36 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
         {
             POINT pt;
             GetCursorPos(&pt);
-            ShowTaskContextMenu(hWnd, pt.x, pt.y);
-            return 0;
-        }
-        if (pnmh->idFrom == IDC_SYNC_LIST && pnmh->code == LVN_KEYDOWN)
-        {
-            NMLVKEYDOWN* key = (NMLVKEYDOWN*)lParam;
-            if (key->wVKey == VK_DELETE)
+            HMENU hMenu = CreatePopupMenu();
+            AppendMenuW(hMenu, MF_STRING, 1, L"显示窗口");
+            AppendMenuW(hMenu, MF_STRING, 2, L"同步全部");
+            AppendMenuW(hMenu, MF_STRING, 3,
+                IsMonitoringChecked() ? L"停止实时同步监控" : L"启动实时同步监控");
+            AppendMenuW(hMenu, MF_SEPARATOR, 0, nullptr);
+            AppendMenuW(hMenu, MF_STRING, 4, L"退出程序");
+            SetForegroundWindow(hWnd);
+            int cmd = TrackPopupMenu(hMenu, TPM_RETURNCMD | TPM_NONOTIFY, pt.x, pt.y, 0, hWnd, nullptr);
+            DestroyMenu(hMenu);
+            if (cmd == 1)
             {
-                RemoveSelectedSyncPair(hWnd);
-                return 0;
+                ShowMainWindow(hWnd);
             }
-            if (key->wVKey == VK_RETURN)
+            else if (cmd == 2)
             {
-                EditSelectedSyncPair(hWnd);
-                return 0;
+                StartSync(hWnd);
+            }
+            else if (cmd == 3)
+            {
+                const bool checked = IsMonitoringChecked();
+                SendMessageW(hAutoMonitor, BM_SETCHECK, checked ? BST_UNCHECKED : BST_CHECKED, 0);
+                ToggleMonitoring(hWnd);
+            }
+            else if (cmd == 4)
+            {
+                DestroyWindow(hWnd);
             }
         }
-        break;
+        return 0;
     }
     case WM_PAINT:
         {
@@ -374,8 +460,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
     {
         if (lParam == WM_LBUTTONDBLCLK)
         {
-            ShowWindow(hWnd, SW_RESTORE);
-            SetForegroundWindow(hWnd);
+            ShowMainWindow(hWnd);
         }
         else if (lParam == WM_RBUTTONUP)
         {
@@ -393,8 +478,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
             DestroyMenu(hMenu);
             if (cmd == 1)
             {
-                ShowWindow(hWnd, SW_RESTORE);
-                SetForegroundWindow(hWnd);
+                ShowMainWindow(hWnd);
             }
             else if (cmd == 2)
             {
